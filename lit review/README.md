@@ -10,6 +10,7 @@ Working notes on the six areas Blindsight depends on (radiation, vital signs, EC
 | [eeg-applications](eeg-applications/README.md) | EEG signal processing, seizure and cognitive-state applications |
 | [bone-health-metrics](bone-health-metrics/README.md) | Bone density, fracture risk, and bone loss in spaceflight |
 | [behavioral-health](behavioral-health/README.md) | Mood, anxiety, stress, sleep, and alertness monitoring in isolation and confinement |
+| [model-architectures](model-architectures/README.md) | Candidate model architectures per module, with verified sources and the `EVA-[n]` ID scheme |
 | [integration-and-evaluation.md](integration-and-evaluation.md) | Shared schema, evaluation protocol, risks, and phasing across all areas |
 | [data-collection-sources](data-collection-sources/README.md) | Public and controlled datasets, with license and access notes |
 

@@ -1,0 +1,49 @@
+# Model Registry
+
+Every retained model architecture and trained model in this repository gets a unique identifier of the form **`EVA-[n]`**, where `n` is a positive integer assigned in order of creation. This file is the single source of truth.
+
+**Next free ID: EVA-1**
+
+## Rules
+
+1. **One sequence for everything.** Architectures and trained models share a single counter. An ID's number says only "this was created Nth"; the `Type` column says what it is.
+2. **Types.**
+   - `arch`: a model architecture definition (the layer structure, inputs and outputs, and training recipe, written as a spec).
+   - `model`: a trained instance of an architecture (a specific set of weights or fitted parameters). It must list its parent `arch` ID.
+   - A new architecture is a new ID. A retrain of the same architecture on new data or with a new seed is a new `model` ID.
+3. **Assigned at creation, in order.** Take the number in "Next free ID", add a registry row in the same commit that introduces the artifact, then increment "Next free ID". No gaps are planned, but a gap is allowed if an ID is withdrawn.
+4. **Never reused, never renumbered.** A retired or withdrawn entry keeps its row and ID. Its `Status` changes; the number does not.
+5. **Written as `EVA-n`** with no zero padding (`EVA-7`, `EVA-112`). Use the ID in filenames, model cards, logs, and result tables (for example `EVA-7_model_card.md`).
+6. **Candidates are not numbered.** Architectures listed in [lit review/model-architectures](lit%20review/model-architectures/README.md) are candidates until someone creates one. They receive an ID when the spec or the trained artifact is first committed.
+7. **No ID for throwaway experiments.** A scratch run that is not retained does not get an ID. Anything cited in a result table, report, or comparison must have one.
+8. **Required for every row:** the git commit, the data version, the split version, the evaluation protocol, and the headline metric with a confidence interval. A model with no subject-wise evaluation is registered with `Status = draft` and may not be reported as a result.
+
+## Status values
+
+`draft` (created, not yet evaluated), `active` (evaluated and in use or comparison), `superseded` (replaced by a later ID, kept for the record), `retired` (no longer used), `withdrawn` (found faulty, for example data leakage; never to be cited as a result).
+
+## Registry
+
+| ID | Type | Name | Parent | Module | Task | Created | Commit | Data version | Split version | Evaluation | Metric (95% CI) | Status | Card |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| | | | | | | | | | | | | | |
+
+## Entry template
+
+```
+ID:            EVA-[n]
+Type:          arch | model
+Name:          short descriptive name
+Parent:        EVA-[m] (models only)
+Module:        radiation | vitals | ecg | eeg | behavioral | fusion | bone
+Task:          what it predicts or flags
+Created:       YYYY-MM-DD
+Commit:        git hash
+Data version:  dataset names, versions, license notes
+Split version: subject-wise / time-forward split definition and hash
+Evaluation:    protocol (subject-wise, external site, event-based, etc.)
+Metric:        headline metric with 95% CI (subject-level bootstrap)
+Status:        draft | active | superseded | retired | withdrawn
+Card:          link to the model card
+Notes:         known failure modes, leakage checks, fairness gate result
+```
