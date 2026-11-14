@@ -6,6 +6,11 @@
 - **Use:** the main seizure-detection benchmark for this lab's work.
 - **Limit:** clinical setting with many electrodes and montage variation. A wearable system will have fewer channels, so a channel-mapping step is required.
 
+## SeizeIT2 (OpenNeuro, BIDS)
+- **What:** wearable dataset of patients with focal epilepsy: over 11,000 hours of behind-the-ear EEG with ECG, EMG, and motion; 883 focal seizures from 125 patients at five European centers (Bhagubai et al., 2025, *Scientific Data*, 12, 1228).
+- **Access:** published on OpenNeuro in BIDS format with a training and validation split and two benchmark approaches; license not checked.
+- **Use:** the external wearable test set for any seizure model trained on TUSZ, and a multimodal (EEG plus ECG) example.
+
 ## CHB-MIT Scalp EEG Database (PhysioNet)
 - **What:** pediatric scalp EEG with seizure annotations, from the Boston Children's Hospital group. Used in Shoeb & Guttag (2010).
 - **Access:** open on PhysioNet. Check the license on the dataset page (not verified in this pass).

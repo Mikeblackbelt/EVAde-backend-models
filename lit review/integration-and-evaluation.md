@@ -36,6 +36,11 @@ Open design choices: how to handle clock drift between devices, whether the radi
 6. **Subgroup analysis.** Age, sex, skin tone (for PPG/rPPG), medication use, and motion level.
 7. **Negative controls.** Shuffled labels, artifact-only segments.
 8. **Pre-registration of claims.** Write the claim, metric, and threshold before looking at the test set.
+9. **Structure the evidence plan with V3.** Verification (sensor and pipeline), analytical validation (algorithm against a reference), and clinical validation (target users), per Goldsack et al. (2020), *npj Digit Med*, 3, 55, DOI 10.1038/s41746-020-0260-4.
+10. **Use a leakage checklist.** Subject-wise and time-forward splits and a model info sheet (Saeb et al. 2017, DOI 10.1093/gigascience/gix019; Kapoor & Narayanan 2023, DOI 10.1016/j.patter.2023.100804). For EEG, segment-wise splits strongly overestimate performance on new subjects (Brookshire et al. 2024, DOI 10.3389/fnins.2024.1373515).
+11. **Use domain-standard metrics.** Event-based scoring for seizures (SzCORE; Dan et al. 2025, DOI 10.1111/epi.18113); Bland-Altman bias and limits of agreement for HR, RR, and HRV (Chan et al. 2022, DOI 10.1111/anae.15834); least significant change for bone (ISCD 2019 positions).
+12. **Fairness gate.** Pre-register a maximum allowed between-group error difference, with skin tone measured objectively for PPG and rPPG.
+13. **Include a trivial baseline.** Always report a logistic regression and a per-person mean baseline next to any complex model.
 
 ## 4. Cross-modality risks
 
@@ -48,6 +53,11 @@ Open design choices: how to handle clock drift between devices, whether the radi
 | Confounding by medication | HRV, sleep, EEG | record medication as covariate |
 | Environmental artifact | radiation events, lighting for rPPG | radiation flag, light logging |
 | Over-claiming | all | scope statements; flag-for-review language |
+| Physiology drifts with time in isolation or orbit | HRV (HF power falls in orbit and over an Antarctic winter), sleep, bone | in-mission personal baseline and a time-in-mission term; exclude early post-mission weeks |
+| Device and firmware change | PPG, HRV, sleep trackers | log device model and firmware; never pool across brands without a bridging study |
+| Cross-site shift | ECG, EEG, rPPG | external validation; expect a performance drop (about 10% in the PhysioNet 2020 challenge) |
+| Skin-tone bias | PPG SpO2, rPPG | tone-stratified validation with objective tone measurement; report tail error as well as mean bias |
+| Label ceiling | behavioral health | no ICE-validated questionnaire cutoff exists; use several labels and report what each means |
 
 ## 5. Claim language
 
@@ -58,7 +68,7 @@ Open design choices: how to handle clock drift between devices, whether the radi
 | "Reports a sleep-duration trend." | "Diagnoses insomnia." |
 | "Estimates a bone-loss trend relative to personal baseline." | "Diagnoses osteoporosis." |
 
-Regulatory classification of health claims (for example, wellness versus medical device) was not researched in this review. Get qualified advice before any use beyond research.
+Regulatory context is summarized in [behavioral-health/instruments-and-governance.md](behavioral-health/instruments-and-governance.md): the FDA general wellness guidance (reissued 6 Jan 2026) treats stress, sleep, and mental-acuity claims as lower risk and disease claims as device territory; the FDA pulse oximeter draft guidance (7 Jan 2025) was not found to be finalized; and EU AI Act high-risk dates were amended to 2 Dec 2027 (Annex III) and 2 Aug 2028 (Annex I). This is context, not legal advice. Get qualified advice before any use beyond research.
 
 ## 6. Privacy and governance
 

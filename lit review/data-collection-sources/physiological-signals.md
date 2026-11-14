@@ -7,7 +7,7 @@
 - **Limit:** old recordings (1970s-era acquisition) and a small number of subjects.
 
 ## PTB-XL (PhysioNet)
-- **What:** 21,799 clinical 12-lead ECGs from 18,869 patients, 10 s each, with recommended train/test splits.
+- **What:** about 21,800 clinical 12-lead ECGs from about 18,870 patients, 10 s each, with recommended train/test splits. Counts differ by version: the data paper (Wagner et al., 2020) reports 21,837 records and 18,885 patients; the PhysioNet v1.0.3 page lists 21,799 and 18,869.
 - **Access:** open on PhysioNet. License: CC BY 4.0 (per the PhysioNet entry).
 - **Use:** pretraining arrhythmia or rhythm models. Transfer to single-lead wearable data must be tested separately.
 - **Limit:** clinical 12-lead, not wearable single-lead. Lead layout differs.
@@ -32,6 +32,17 @@
 
 ## PURE (rPPG)
 - **Status:** a 10-subject rPPG dataset. No access terms were found; verify before use.
+
+## PhysioNet/CinC Challenge data (2020 and 2021)
+- **What:** multi-source 12-lead ECG collections used in the challenges (66,361 recordings from six hospital systems in 2020; 131,149 recordings from ten sources in the 2021 follow-up paper). Hidden test sets were not released.
+- **Use:** multi-institution training and external-validation design, and reduced-lead experiments. **Limit:** hospital 12-lead data, not wearable single-lead.
+- **Access:** public training data on PhysioNet; check each source's terms.
+
+## rPPG datasets (verified records, access terms not checked)
+- **MMPD** (Tang et al., EMBC 2023): phone video with skin-tone, motion, and lighting conditions; the recommended hard test set.
+- **SCAMPS** (McDuff et al., NeurIPS 2022): synthetic videos for pretraining; validate on real data.
+- **VIPL-HR** (Niu et al., ACCV 2018): large less-constrained set; check the license.
+- A 2025 audit (Bondarenko et al., *npj Digit Med*, 8, 593) found darker skin tones and gender balance underrepresented across public rPPG datasets, which is the case for a self-collected, tone-balanced validation set.
 
 ## Other to consider (not yet verified)
 - **rPPG-Toolbox** (GitHub, UW ubicomplab): a framework with dataset loaders. Useful to learn the expected data layout. Check its license.

@@ -1,30 +1,38 @@
 # Bone Health and Spaceflight Data Sources
 
+Access terms change; confirm each before use. Status: **VERIFIED** = checked on the source page or a bibliographic record; **PARTIAL** = from search summaries; **UNVERIFIED** = not confirmed.
+
 ## NASA Open Science Data Repository (OSDR)
-- **What:** multi-omics and physiological data from NASA spaceflight and ground studies, including bone-loss studies in rodents (for example, Rodent Research-6). Combines GeneLab omics with data from the Ames Life Sciences Data Archive (ALSDA).
-- **Access:** public at osdr.nasa.gov; processed data are public. Also available on AWS as a public bucket (`nasa-osdr`, listable without an account per the AWS registry). Raw human data requires an application and board approval.
-- **Use:** mostly animal and omics data. Not a direct source for human bone density, but useful for mechanism and countermeasure context.
-- **Limit:** dataset accession numbers and bone-specific filters were not checked in this pass. Search osdr.nasa.gov for bone or skeletal terms.
+- **What:** multi-omics and physiological data from NASA spaceflight and ground studies, including bone-loss studies in rodents (for example Rodent Research-6). Combines GeneLab omics with data from the Ames Life Sciences Data Archive.
+- **Access:** public at osdr.nasa.gov for processed data; also on AWS as a public bucket (`nasa-osdr`, listable without an account per the AWS registry). Controlled-access human data goes through a request on the study's Files tab, a curator, and a Data Access Committee (from a search summary; PARTIAL).
+- **Use:** mostly animal and omics data; mechanism and countermeasure context, not human bone density.
+- **Limit:** bone-specific accession numbers were not checked.
 
 ## NASA Life Sciences Portal / Life Sciences Data Archive (LSDA)
-- **What:** human and animal spaceflight physiology data from 1961 onward, accessed through the NASA Life Sciences Portal (NLSP).
-- **Access:** a request is required. A single request form was used across repositories in a 2012 presentation; confirm the current process on the portal. Human data may need an IRB-equivalent review.
-- **Use:** the primary source for human in-flight bone density data, if access is granted.
-- **Limit:** the search results found mostly animal bone datasets. Human DXA or QCT availability needs direct confirmation.
+- **What:** human and animal spaceflight physiology data from 1961 onward.
+- **Access:** request-based. The LSDA moved under the NASA Life Sciences Portal; the request page is nlsp.nasa.gov/explore/lsdahome/datarequest. A search summary indicates a request form, a review, and NASA IRB approval, with de-identified and possibly attributable astronaut data available for peer-reviewed research (PARTIAL; the page body could not be fetched).
+- **Use:** the primary route to human in-flight bone density data.
+- **Limit:** mostly animal bone datasets surfaced in searches; confirm human DXA and QCT availability directly.
 
-## MrOS (Osteoporotic Fractures in Men) and SOF (Study of Osteoporotic Fractures)
-- **What:** large prospective cohorts of older adults with DXA, QCT, and HR-pQCT scans and fracture outcomes. MrOS also has a sleep sub-study. The enrollment figure of 3,135 is **UNVERIFIABLE**; NSRR lists 2,907 men with visit-1 PSG.
+## NASA Lifetime Surveillance of Astronaut Health (LSAH)
+- **Status:** current request procedure not found (UNVERIFIED). Older NASA slides describe one request form across LSDA and LSAH, with Privacy Act constraints. Contact NASA directly.
+
+## MrOS and SOF
+- **What:** large prospective cohorts of older adults with DXA, QCT, and HR-pQCT scans and fracture outcomes. MrOS also has a sleep sub-study; NSRR lists 2,907 men with visit-1 polysomnography.
 - **Access:** MrOS Online is public to registered users who accept its data use agreement. MrOS sleep data are hosted on sleepdata.org (NSRR). SOF materials are requested through the NIA Aging Research Biobank ("Request for Materials"); the ancillary-study process was not confirmed.
-- **Use:** calibration of a longitudinal bone-loss model and validation of portable proxies against DXA. Older male population is the MrOS limit; SOF is women.
-- **Limit:** these are not spaceflight cohorts. Use them for measurement validation, not for the mission-loss rate.
+- **Use:** calibration of longitudinal bone-loss models and validation of proxies against DXA.
+- **Limit:** not spaceflight cohorts; older men (MrOS) or women (SOF).
 
 ## NHANES (CDC)
-- **What:** national survey with DXA scans in a subset of participants, plus demographic and fitness covariates.
-- **Access:** public, no application needed. Whole-body DXA began in the 1999 cycle (ages 8+); lumbar spine DXA began in 2005; a 2017-2018 spine file exists. Confirm the full list of DXA cycles on the CDC site.
-- **Use:** reference distributions of BMD by age, sex, and ethnicity for normative comparisons.
-- **Limit:** cross-sectional, not longitudinal.
+- **Access:** public, no application. DXA files by cycle (verified on CDC pages):
+  - 1999-2006: whole-body DXA (femur and spine for 2005-2006 not checked).
+  - 2007-2008 and 2009-2010: femur and spine.
+  - 2011-2012 and 2015-2016: whole body and android/gynoid only (no femur or spine seen).
+  - 2013-2014: full set (femur, spine, FRAX, vertebral fracture assessment).
+  - 2017-March 2020 (pre-pandemic): femur and spine.
+  - 2021-2023: no DXA file on the examination list page.
+- **Use:** reference distributions of BMD by age, sex, and ethnicity. **Limit:** cross-sectional, general US population.
 
 ## UK Biobank
-- **What:** large cohort with imaging and health records, including bone measures in a subset.
-- **Access:** via the Research Analysis Platform; bulk downloads are exceptional. Imaging-tier fee £9,000 + VAT for 3 years; £500 + VAT for eligible students (data-only). Whether DXA is platform-only is unclear. Fee figures are from search-result text, not the fees page.
-- **Use:** large-sample validation of portable proxies, if access is granted.
+- **What:** large cohort with an imaging enhancement that includes DXA (whole body, lumbar spine, hips, knees, vertebral fracture assessment) in a subset; current DXA n not verified (PARTIAL).
+- **Access:** application via the Research Analysis Platform; downloads are exceptional. Fees quoted in search text: 9,000 GBP plus VAT for 3 years (imaging tier) and 500 GBP plus VAT for eligible students (data-only); confirm on the fees page. Whether DXA is platform-only is unclear.

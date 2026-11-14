@@ -1,40 +1,51 @@
 # EEG Applications
 
-## Summary
+Status labels: **VERIFIED** = bibliographic record and abstract checked; **PARTIAL** = record checked, abstract not read; **UNVERIFIED** = not confirmed. Behavioral uses of EEG (mood, fatigue, vigilance) are covered in [behavioral-health/eeg.md](../behavioral-health/eeg.md).
 
-EEG records cortical electrical activity at the scalp. Applications relevant to Blindsight:
+## 1. Summary
 
-- **Seizure detection**: the most mature EEG task. Patient-specific classifiers on scalp EEG have been studied since the 2000s.
-- **Cognitive and attention state**: spectral features and event-related potentials. Often confounded by artifacts.
-- **Sleep staging**: established but needs its own labeled data.
+The mature EEG applications here are seizure detection and sleep staging. Seizure detection has a clinical guideline (ILAE and IFCN), an event-based evaluation framework (SzCORE), large public corpora (TUSZ for clinical scalp EEG, SeizeIT2 for wearable behind-the-ear EEG), and wearable validation trials. The guideline supports wearable detection of **convulsive** seizures, and not other seizure types. Preprocessing and artifact handling dominate performance, and **subject leakage** is the most common reason published numbers do not hold on new patients.
 
-The signal is small (microvolts), and artifacts from eye movement, muscle, and electrode drift are often larger than the signal of interest. Preprocessing and artifact handling usually decide results more than model choice. Compact CNNs (EEGNet) are a common starting point. The hard problem is generalization to new patients; many published results leak subjects across train and test splits.
+## 2. Seizure detection
 
-## Sources
+- **TUSZ.** Shah et al. (2018). The Temple University Hospital Seizure Detection Corpus. *Front Neuroinform*, 12, 83. DOI 10.3389/fninf.2018.00083. VERIFIED (record). **Obeid & Picone (2016).** The Temple University Hospital EEG Data Corpus. *Front Neurosci*, 10, 196. DOI 10.3389/fnins.2016.00196. VERIFIED. Access requires registration (nedcdata.org). No 2020+ TUSZ benchmark paper beyond SzCORE was verified.
+- **SzCORE.** Dan et al. (2025). *Epilepsia*, 66(Suppl 3), 14-24. DOI 10.1111/epi.18113. VERIFIED. Standardizes datasets, file formats, cross-validation, and event-based metrics, with an open "EEG 10-20 seizure detection benchmark". Benchmark companion: Samanos et al. (2025), *IEEE EMBC*, DOI 10.1109/EMBC58623.2025.11254038 (PARTIAL).
+- **ILAE and IFCN guideline.** Beniczky et al. (2021). Automated seizure detection using wearable devices: a clinical practice guideline. *Epilepsia*, 62(3), 632-646. DOI 10.1111/epi.16818. VERIFIED. High-level evidence for generalized and focal-to-bilateral tonic-clonic seizure detection; moderate for other types; not recommended for clinical use for other seizure types; unclear whether alarms improve outcomes. Validation standards: Beniczky & Ryvlin (2018), *Epilepsia*, 59(Suppl 1), 9-13, DOI 10.1111/epi.14049 (VERIFIED; older).
+- **SeizeIT2.** Bhagubai et al. (2025). Wearable dataset of patients with focal epilepsy. *Scientific Data*, 12, 1228. DOI 10.1038/s41597-025-05580-x. VERIFIED. Over 11,000 hours of multimodal data (behind-the-ear EEG, ECG, EMG, motion); 883 focal seizures from 125 patients at five European centers; BIDS on OpenNeuro.
+- **Wearable device studies.** Zhang et al. (2024), *Physiol Meas*, 45(6), DOI 10.1088/1361-6579/ad4e94 (VERIFIED; 27 participants, 44 tonic-clonic seizures; multimodal improved accuracy). Lehnen et al. (2025), *J Clin Neurophysiol*, 42(2), 118-125, DOI 10.1097/WNP.0000000000001076 (VERIFIED; 32 patients, 4 scalp electrodes versus 21-channel video-EEG). Jeppesen et al. (2025), *EBioMedicine*, 120, 105952, DOI 10.1016/j.ebiom.2025.105952 (VERIFIED; phase 3 wearable ECG detector). Onorati et al. (2021), *Front Neurol*, 12, 724904, DOI 10.3389/fneur.2021.724904 (PARTIAL). "Empaviot" was not found in any index (UNVERIFIED; possibly a misnomer).
+- **Classic reference.** Shoeb & Guttag (2010). *Proc 27th ICML*, 975-982. VERIFIED. Patient-specific classifiers on the CHB-MIT database.
+- **Updated review (not verified):** Mohamed et al. (2026), *Front Bioeng Biotechnol*, 14, 1833080, DOI 10.3389/fbioe.2026.1833080 (record only).
 
-- **Shoeb, A. H., & Guttag, J. V. (2010).** Application of machine learning to epileptic seizure detection. *Proceedings of the 27th International Conference on Machine Learning (ICML 2010)*, pp. 975-982, Omnipress. Verified. Patient-specific classifiers on scalp EEG, using the CHB-MIT database (on PhysioNet). Shoeb's 2009 MIT thesis covers the same work in more depth.
-- **Lawhern, V. J., Solon, A. J., Waytowich, N. R., Gordon, S. M., Hung, C. P., & Lance, B. J. (2018).** EEGNet: a compact convolutional neural network for EEG-based brain-computer interfaces. *Journal of Neural Engineering*, 15(5), 056013. DOI 10.1088/1741-2552/aace8c. Verified. The authors' GitHub (ARL EEGModels) has reference code, which is outside this review's no-code scope but useful to know about.
-- **Delorme, A., & Makeig, S. (2004).** EEGLAB: an open source toolbox for analysis of single-trial EEG dynamics including independent component analysis. *Journal of Neuroscience Methods*, 134(1), 9-21. DOI 10.1016/j.jneumeth.2003.10.009. Verified. Source of the standard ICA-based artifact-removal approach. Check the current EEGLAB license before bundling it; it has changed over time.
-- **Obeid, I., & Picone, J. (2016).** The Temple University Hospital EEG Data Corpus. *Frontiers in Neuroscience*, 10, 196. DOI 10.3389/fnins.2016.00196. Verified. Describes the TUH EEG corpus, which the TUSZ seizure work in this lab builds on. Access requires registration at nedcdata.org.
+## 3. Models, preprocessing, and reproducibility
 
-## Implementation steps
+- **EEGNet.** Lawhern et al. (2018). *J Neural Eng*, 15(5), 056013. DOI 10.1088/1741-2552/aace8c. VERIFIED. Compact CNN for BCIs.
+- **Leakage.** Brookshire et al. (2024). *Front Neurosci*, 18, 1373515. DOI 10.3389/fnins.2024.1373515. VERIFIED. Segment-based holdout strongly overestimated performance on unseen subjects in seizure and Alzheimer's data.
+- **Foundation models.** Kuruppu et al. (2026). *J Neural Eng*, 23(2), 021001. DOI 10.1088/1741-2552/ae4455. VERIFIED. Evaluations are heterogeneous and limited; off-the-shelf utility is hard to assess.
+- **Standards and tools.** Pernet et al. (2020) COBIDAS MEEG, *Nat Neurosci*, 23(12), 1473-1483, DOI 10.1038/s41593-020-00709-0 (PARTIAL); Pernet et al. (2019) EEG-BIDS, *Sci Data*, 6, 103, DOI 10.1038/s41597-019-0104-8 (PARTIAL); Appelhoff et al. (2019) MNE-BIDS, *JOSS*, 4(44), 1896, DOI 10.21105/joss.01896 (VERIFIED); Bigdely-Shamlo et al. (2015) PREP, *Front Neuroinform*, 9, 16, DOI 10.3389/fninf.2015.00016 (VERIFIED); Gramfort et al. (2013) MNE-Python, *Front Neurosci*, 7, 267, DOI 10.3389/fnins.2013.00267 (VERIFIED); Delorme & Makeig (2004) EEGLAB, *J Neurosci Methods*, 134(1), 9-21, DOI 10.1016/j.jneumeth.2003.10.009 (VERIFIED).
+- **Artifacts.** Gorjan et al. (2022), *J Neural Eng*, 19(1), 011004, DOI 10.1088/1741-2552/ac542c (VERIFIED); Ledwidge et al. (2025), *Sensors*, 25(15), 4810, DOI 10.3390/s25154810 (VERIFIED); Chang et al. (2020), *IEEE TBME*, 67(4), 1114-1121, DOI 10.1109/TBME.2019.2930186 (PARTIAL); ICLabel, Pion-Tonachini et al. (2019), *NeuroImage*, 198, 181-197, DOI 10.1016/j.neuroimage.2019.05.026 (PARTIAL).
+- **Hardware.** Niso et al. (2023), *NeuroImage*, 269, 119774, DOI 10.1016/j.neuroimage.2022.119774 (VERIFIED; 48 wireless devices); Hinrichs et al. (2020), *Sci Rep*, 10, 5218, DOI 10.1038/s41598-020-62154-0 (VERIFIED; dry versus wet electrodes, theta and delta biased upward); Mikkelsen et al. (2019), *Sci Rep*, 9, 16824, DOI 10.1038/s41598-019-53115-3 (VERIFIED; ear-EEG sleep staging kappa 0.73).
 
-1. **Reference pipeline on TUSZ.** Use the TUH EEG Seizure Corpus with a documented preprocessing spec (see data sources). Reproduce a published baseline before changing anything.
-2. **Preprocessing.** Re-reference (average or linked-ears), band-pass 0.5-50 Hz, 60 Hz notch (50 Hz outside the US), resample to a fixed rate, and epoch into fixed windows. Write these parameters into a config file so runs are reproducible.
-3. **Artifact handling.** Run ICA for eye and muscle components, then amplitude-based rejection as a second pass. Log the rejection rate per recording; a high rate means the recording is excluded, not cleaned.
-4. **Baseline model.** Feature-based (band powers, line length, etc.) with a gradient-boosted classifier. Only then try EEGNet, and report it against the baseline.
-5. **Evaluation.** Use patient-independent splits only. Report event-based sensitivity, false alarms per 24 h, and the number of subjects in each split. Include a subject-level bootstrap confidence interval.
-6. **Schema alignment.** Use the same window length and label schema as the ECG and vital-sign pipelines so Blindsight can fuse them later.
+## 4. Implementation steps
 
-## Evaluation and robustness
+1. Use TUSZ for scalp seizure detection and SeizeIT2 as the external wearable test set; reproduce a published baseline before changing anything.
+2. Scope claims to convulsive seizures for wearable devices unless focal-seizure evidence is generated.
+3. Preprocessing spec in a config file: re-reference, 0.5-50 Hz band-pass, line-frequency notch (60 Hz in the US), fixed resampling rate, fixed windows.
+4. Artifact handling by activity level: ICA for eye and muscle components, ASR or similar as a second pass; log rejection rates; exclude recordings with high rejection.
+5. Baseline model: band-power and line-length features with a gradient-boosted classifier; then EEGNet; report both.
+6. Evaluate with SzCORE event-based metrics (sensitivity, false alarms per 24 hours, event F1) and patient-disjoint splits; do not compare with epoch-level literature numbers.
+7. Store data in EEG-BIDS via MNE-BIDS and report against COBIDAS-MEEG.
+8. Treat TUSZ-trained models as unvalidated for behind-the-ear or in-ear montages until tested on SeizeIT2.
+9. Use the same window and label schema as the ECG and vital-sign pipelines to allow later fusion.
 
-- **Metrics:** event-based sensitivity, false alarms per 24 hours, detection latency, and the number of subjects and seizures in each split.
-- **Robustness checks:** channel dropout and montage changes; noise injection (eye blink, muscle); performance by seizure type and by recording duration; sensitivity to the artifact-rejection threshold.
-- **Uncertainty:** subject-level bootstrap confidence intervals. Seizure counts per patient are small, so intervals will be wide.
+## 5. Evaluation and robustness
 
-## Limitations and open questions
+- **Metrics:** event-based sensitivity, false alarms per 24 hours, detection latency; number of subjects and seizures in each split.
+- **Robustness checks:** channel dropout and montage change; noise injection (blink, muscle); performance by seizure type and recording duration; sensitivity to the artifact-rejection threshold.
+- **Uncertainty:** subject-level bootstrap confidence intervals; seizure counts per patient are small, so intervals will be wide.
 
-- Clinical EEG with a full montage differs from wearable EEG with few channels; a channel-mapping and re-training step is required, and results do not transfer automatically.
-- Annotation noise in clinical seizure labels sets a ceiling on measurable performance.
-- EEG for behavioral or affective state (DEAP-style datasets) is a separate, weaker evidence base than seizure detection; see [behavioral-health](../behavioral-health/README.md).
-- Open: minimum channel count and placement for useful wearable seizure detection.
+## 6. Limitations and open questions
+
+- Full-montage clinical EEG differs from few-channel wearable EEG; a channel-mapping and retraining step is required.
+- Annotation noise sets a ceiling on measurable performance.
+- Which 2020+ TUSZ benchmark papers are citable, and what is the minimum channel count and placement for useful wearable seizure detection?
+- PARTIAL items (Samanos 2025, Onorati 2021, COBIDAS, EEG-BIDS, Chang 2020, ICLabel) need abstract review before any number is quoted.

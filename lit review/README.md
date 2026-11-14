@@ -11,9 +11,12 @@ Working notes on the six areas Blindsight depends on (radiation, vital signs, EC
 | [bone-health-metrics](bone-health-metrics/README.md) | Bone density, fracture risk, and bone loss in spaceflight |
 | [behavioral-health](behavioral-health/README.md) | Mood, anxiety, stress, sleep, and alertness monitoring in isolation and confinement |
 | [model-architectures](model-architectures/README.md) | Candidate model architectures per module, with verified sources and the `EVA-[n]` ID scheme |
+| [planning](planning/README.md) | Theoretical design for an automatic risk score in (0,1) and days to return (under 5 to over 100) |
 | [integration-and-evaluation.md](integration-and-evaluation.md) | Shared schema, evaluation protocol, risks, and phasing across all areas |
 | [data-collection-sources](data-collection-sources/README.md) | Public and controlled datasets, with license and access notes |
 
 ## Verification status
 
-A verification pass (second round) checked the key citations and dataset access terms against search results, abstracts, and press releases. Full texts were mostly not accessible (publisher pages returned 403s or redirects), and some DOIs remain unconfirmed; the bibliography entries still say so where that applies. Specific numbers must be re-checked against the paper before they go into a report. Items marked **UNRESOLVED** or **UNVERIFIABLE** have conflicting or missing sources.
+The topic sections were rewritten from six parallel literature searches that prioritized recent peer-reviewed sources (2019-2026: meta-analyses, systematic reviews, large studies, guidelines). Bibliographic fields were checked against Crossref, PubMed, or Europe PMC, and abstract-level numbers against PubMed or Europe PMC abstracts. Every source is labeled **VERIFIED** (record and abstract checked), **PARTIAL** (record checked, abstract or numbers not read), or **UNVERIFIED**. Full texts were mostly not read, and publisher pages often returned 403s, so numbers must be re-checked against the paper before they go into a report. Press releases are no longer used as number sources.
+
+Known gaps are listed in each section, including: no verified depression-specific EEG-ECG fusion study; no ICE-validated questionnaire cutoff; no 2020+ Mars-500, NEK, LunAres, or HI-SEAS results found; no validated portable bone proxy for spaceflight; and unconfirmed items such as NASA-STD-3001 Rev C text and the final FDA pulse oximeter guidance.
