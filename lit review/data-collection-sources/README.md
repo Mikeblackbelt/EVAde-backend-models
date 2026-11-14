@@ -1,0 +1,17 @@
+# Data Collection Sources
+
+Where training and validation data for Blindsight can come from, with access terms and known limits. Licenses change, so check each source's page before use. Nothing here has been downloaded or tested.
+
+| File | Covers |
+|---|---|
+| [physiological-signals.md](physiological-signals.md) | ECG, PPG, and rPPG datasets |
+| [eeg.md](eeg.md) | EEG seizure, sleep, and stress datasets |
+| [space-radiation.md](space-radiation.md) | Radiation measurements from spaceflight and planetary missions |
+| [bone-and-spaceflight.md](bone-and-spaceflight.md) | Bone density data from spaceflight and older-adult cohorts |
+
+## Rules for all sources
+
+1. **Record the license and access terms** in the file when you first use a dataset. Revisit the terms before any commercial or shared use.
+2. **Use subject-level splits.** Any dataset with repeated recordings per person needs train/test separation by person, or results will be inflated.
+3. **Keep raw files read-only** and store a checksum with each. Do not commit raw data to this repository. Put only download scripts and a manifest here, once code exists.
+4. **Note demographics.** Record age, sex, and skin tone where available, because they change how well the sensors work.
