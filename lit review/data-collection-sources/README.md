@@ -8,6 +8,7 @@ Where training and validation data for Blindsight can come from, with access ter
 | [eeg.md](eeg.md) | EEG seizure, sleep, and stress datasets |
 | [space-radiation.md](space-radiation.md) | Radiation measurements from spaceflight and planetary missions |
 | [bone-and-spaceflight.md](bone-and-spaceflight.md) | Bone density data from spaceflight and older-adult cohorts |
+| [behavioral-health.md](behavioral-health.md) | Passive sensing, interview, EEG-affect, and questionnaire sources for behavioral health |
 
 ## Rules for all sources
 

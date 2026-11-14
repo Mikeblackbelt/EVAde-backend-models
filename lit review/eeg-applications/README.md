@@ -25,3 +25,16 @@ The signal is small (microvolts), and artifacts from eye movement, muscle, and e
 4. **Baseline model.** Feature-based (band powers, line length, etc.) with a gradient-boosted classifier. Only then try EEGNet, and report it against the baseline.
 5. **Evaluation.** Use patient-independent splits only. Report event-based sensitivity, false alarms per 24 h, and the number of subjects in each split. Include a subject-level bootstrap confidence interval.
 6. **Schema alignment.** Use the same window length and label schema as the ECG and vital-sign pipelines so Blindsight can fuse them later.
+
+## Evaluation and robustness
+
+- **Metrics:** event-based sensitivity, false alarms per 24 hours, detection latency, and the number of subjects and seizures in each split.
+- **Robustness checks:** channel dropout and montage changes; noise injection (eye blink, muscle); performance by seizure type and by recording duration; sensitivity to the artifact-rejection threshold.
+- **Uncertainty:** subject-level bootstrap confidence intervals. Seizure counts per patient are small, so intervals will be wide.
+
+## Limitations and open questions
+
+- Clinical EEG with a full montage differs from wearable EEG with few channels; a channel-mapping and re-training step is required, and results do not transfer automatically.
+- Annotation noise in clinical seizure labels sets a ceiling on measurable performance.
+- EEG for behavioral or affective state (DEAP-style datasets) is a separate, weaker evidence base than seizure detection; see [behavioral-health](../behavioral-health/README.md).
+- Open: minimum channel count and placement for useful wearable seizure detection.

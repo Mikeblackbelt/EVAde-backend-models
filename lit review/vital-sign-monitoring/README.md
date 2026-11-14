@@ -26,3 +26,16 @@ For Blindsight, PPG is the non-EEG/ECG physiological stream. rPPG is a later-pha
 5. **Respiration.** Derive RR from the PPG baseline wander and amplitude modulation; validate against a respiration belt before reporting.
 6. **rPPG (later phase).** Track a face ROI, then apply POS or chrominance-based extraction. Compare against your contact-PPG baseline on the same recordings.
 7. **Output schema.** Each record: HR, RR, SpO2 (if available), SQI, timestamp, modality tag, and a radiation-health flag from the space-radiation module.
+
+## Evaluation and robustness
+
+- **Metrics:** MAE and RMSE for HR and RR; Bland-Altman bias and limits of agreement; percent of windows retained after SQI gating; SpO2 error against a reference oximeter.
+- **Stratification:** report results by motion level (rest, walking, talking), ambient light (for rPPG), sensor placement, and skin tone.
+- **Robustness checks:** deliberately degrade signals (added motion, reduced light, shifted sensor position) and report how SQI responds; check that the SQI actually predicts error.
+- **Reference quality:** the reference device has its own error; state it.
+
+## Limitations and open questions
+
+- rPPG accuracy depends on stable lighting and little motion; skin-tone effects need explicit testing, and the literature on measurement bias across skin tones was not reviewed in this pass.
+- Wrist SpO2 requires its own calibration and validation; HR performance does not transfer to SpO2.
+- Open: which modality is the fallback when the primary sensor fails? What minimum SQI justifies reporting a number?

@@ -24,3 +24,16 @@ Key numbers from the Mars Science Laboratory RAD measurements (Hassler et al., 2
 5. **Write a data-quality rule.** Samples within a fixed window (start at 5 s, tune later) of a detected event are marked suspect. Keep the raw sample; do not drop it silently.
 6. **Validate against public data.** Use published flight or ground-test datasets to check the event-flag logic, if access is available (see [data-collection-sources](../data-collection-sources/space-radiation.md)).
 7. **Document the limits.** A lab-calibrated prototype cannot reproduce the GCR spectrum or solar particle events. State this in the README and in any output schema.
+
+## Evaluation and robustness
+
+- **Metrics:** detection efficiency against source activity; dead-time correction accuracy; false-flag rate with the source removed (background run); fraction of physiological data flagged by the suppression rule.
+- **Robustness checks:** temperature dependence of detector gain; coupling of power-supply noise into counts; agreement between two independent detectors; behavior under high count rates.
+- **Reporting:** state calibration source, geometry, and uncertainty with every dose number.
+
+## Limitations and open questions
+
+- A lab beta or gamma source does not reproduce heavy-ion energy deposition. SEU cross-sections need beam testing, which is outside open data.
+- Dose varies with shielding and location in a vehicle; one reading does not apply everywhere.
+- Open: does a body-worn detector add anything beyond a cabin dosimeter for data-quality flagging? What flag window length is justified by SEU physics rather than convenience?
+- Link to health outcomes: radiation also bears on CNS and behavioral risk; see [behavioral-health](../behavioral-health/README.md). No validated quantitative CNS risk model was found.

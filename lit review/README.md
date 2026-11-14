@@ -1,6 +1,6 @@
 # Literature Review
 
-Working notes on the five areas Blindsight depends on, plus a folder of data sources. No code yet. Each topic folder holds a summary, verified sources, and concrete implementation steps. `data-collection-sources/` lists where training and validation data can come from, with access terms.
+Working notes on the six areas Blindsight depends on (radiation, vital signs, ECG, EEG, bone health, behavioral health), a cross-cutting integration and evaluation document, and a folder of data sources. No code yet. Each topic folder holds a summary, verified sources, and concrete implementation steps. `data-collection-sources/` lists where training and validation data can come from, with access terms.
 
 | Folder | Topic |
 |---|---|
@@ -9,6 +9,8 @@ Working notes on the five areas Blindsight depends on, plus a folder of data sou
 | [ecg-applications](ecg-applications/README.md) | ECG signal processing, arrhythmia and stress applications |
 | [eeg-applications](eeg-applications/README.md) | EEG signal processing, seizure and cognitive-state applications |
 | [bone-health-metrics](bone-health-metrics/README.md) | Bone density, fracture risk, and bone loss in spaceflight |
+| [behavioral-health](behavioral-health/README.md) | Mood, anxiety, stress, sleep, and alertness monitoring in isolation and confinement |
+| [integration-and-evaluation.md](integration-and-evaluation.md) | Shared schema, evaluation protocol, risks, and phasing across all areas |
 | [data-collection-sources](data-collection-sources/README.md) | Public and controlled datasets, with license and access notes |
 
 ## Verification status

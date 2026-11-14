@@ -27,3 +27,15 @@ In spaceflight, bone loss is fast at weight-bearing sites and is not fully recov
 4. **Longitudinal model.** Per-person baseline, rate of change over time, and an uncertainty interval. Avoid single-point classification, which would ignore that bone changes slowly and measurements are noisy.
 5. **Include mission context.** Duration, exercise and countermeasure use, and radiation dose (from the radiation module) all change bone loss. Record them as covariates.
 6. **Scope statement.** The output is for research and monitoring, not diagnosis. Put this in the schema and the UI.
+
+## Evaluation and robustness
+
+- **Metrics:** correlation and Bland-Altman agreement of any proxy against DXA BMD; precision error and least significant change for repeated measures (bone changes slowly, so measurement noise must be smaller than the expected monthly change); trend-detection sensitivity at the person level.
+- **Robustness checks:** repeat-measure reliability on the same day and across weeks; sensitivity to positioning, hydration, and device calibration drift.
+- **Covariates:** age, sex, body size, exercise, and medication.
+
+## Limitations and open questions
+
+- The spaceflight QCT study used 14 crew members on 4-6 month missions; rates may not extrapolate to longer missions or to different countermeasure regimens.
+- No portable proxy has been validated against spaceflight bone loss in the sources reviewed.
+- Open: can any non-imaging signal (gait or loading metrics) detect a monthly change of the size reported? What follow-up interval and measurement precision would be needed?
