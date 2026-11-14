@@ -1,1 +1,9 @@
 dataset,path,source_url,license,date_downloaded,files,bytes,sha256_of_listing,subset_note,status
+mitdb,server:~/evade_data/ecg_ppg/mitdb,https://physionet.org/content/mitdb/1.0.0/,ODC-By 1.0,2026-11-14,674,109147636,4bfb94d798c5c3ea,full,ok
+bidmc,server:~/evade_data/ecg_ppg/bidmc,https://physionet.org/content/bidmc/1.0.0/,ODC-By 1.0,2026-11-14,484,217807814,90cc87819091dc57,full; a few CSVs hit transient 502s on re-run,ok
+ptb-xl,server:~/evade_data/ecg_ppg/ptb-xl,https://physionet.org/content/ptb-xl/1.0.3/,CC BY 4.0,2026-11-14,87205,5021028708,f52b3af6f2925c72,official zip plus extracted copy,ok
+chbmit,server:~/evade_data/eeg/chbmit,https://physionet.org/content/chbmit/1.0.0/,ODC-By 1.0,2026-11-14,230,13342125577,344e9a120121f19a,subjects chb01-chb05 (197 EDF),ok
+siena-scalp-eeg,server:~/evade_data/eeg/siena-scalp-eeg,https://physionet.org/content/siena-scalp-eeg/1.0.0/,CC BY 4.0,2026-11-14,26,9203982754,e593ab2aef8b7b5e,subjects PN00 PN01 PN03 PN05 PN06 PN07 (17 EDF),ok
+eegmat,server:~/evade_data/eeg/eegmat,https://physionet.org/content/eegmat/1.0.0/,ODC-By 1.0,2026-11-14,76,183620001,179c77490f536c7d,full,ok
+sleep-edfx,server:~/evade_data/eeg/sleep-edfx,https://physionet.org/content/sleep-edfx/1.0.0/,ODC-By 1.0,2026-11-14,25,503694600,b99fb35a88e7e875,sleep-cassette SC4001-SC4042 (5 subjects; 10 nights),ok
+nhanes-dxa,server:~/evade_data/other/nhanes-dxa,https://wwwn.cdc.gov/nchs/nhanes/,US government public data (CDC),2026-11-14,3,5239120,078447be4437455f,2017-March 2020 P_DXXFEM P_DXXSPN P_DEMO,ok
