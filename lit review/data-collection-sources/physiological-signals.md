@@ -14,12 +14,13 @@
 
 ## BIDMC PPG and Respiration Dataset (PhysioNet)
 - **What:** PPG, ECG, and respiration from ICU patients, with reference HR and RR.
-- **Access:** open on PhysioNet. Check the license on the dataset page before use.
-- **Use:** a contact-PPG baseline with reference respiration. Not yet verified in this review; confirm contents on the page.
+- **Access:** open on PhysioNet. License: Open Data Commons Attribution License v1.0 (per the PhysioNet LICENSE file).
+- **Contents:** 53 recordings of PPG and impedance respiration from ICU patients at BIDMC, 125 Hz, with reference HR and RR. Cite Pimentel et al., IEEE TBME 64(8), 2016 (not re-checked).
+- **Use:** a contact-PPG baseline with reference respiration.
 
 ## WESAD (UCI Machine Learning Repository, ID 465)
 - **What:** multimodal wrist (Empatica E4) and chest (RespiBAN) recordings from 15 subjects during a lab stress protocol, with self-reports. Includes ECG, EDA, EMG, respiration, temperature, and accelerometer.
-- **Access:** free for non-commercial scientific use with attribution (per the original Siegen download page and UCI). Download from the Siegen page; cite Schmidt et al. (2018, ICMI) and the UCI DOI (10.24432/C57K5T).
+- **Access:** non-commercial scientific use with attribution, per the Siegen dataset disclaimer. The UCI page (ID 465) lists no license of its own and refers users to the original site's terms. Download from the Siegen page; cite Schmidt et al. (2018, ICMI). The UCI DOI (10.24432/C57K5T) was not re-checked.
 - **Use:** stress and affect benchmarks for the HRV pipeline. Only 15 subjects, so use subject-wise cross-validation.
 - **Limit:** lab setting, so it does not reflect real-world motion.
 
@@ -30,7 +31,7 @@
 - **Limit:** small, controlled lighting, limited skin-tone diversity. Check which subjects are included.
 
 ## PURE (rPPG)
-- **Status:** not checked in this pass. Commonly cited rPPG dataset; verify its access terms before use.
+- **Status:** a 10-subject rPPG dataset. No access terms were found; verify before use.
 
 ## Other to consider (not yet verified)
 - **rPPG-Toolbox** (GitHub, UW ubicomplab): a framework with dataset loaders. Useful to learn the expected data layout. Check its license.

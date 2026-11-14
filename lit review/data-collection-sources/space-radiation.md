@@ -12,7 +12,8 @@
 - **Use:** background for the risk model and the requirements for dose estimation. Not raw data.
 
 ## CRaTER (Lunar Reconnaissance Orbiter)
-- **Status:** not checked in this pass. A lunar radiation dosimeter with public data through NASA's planetary archives. Verify the current data location and access before use.
+- **What:** a lunar radiation dosimeter.
+- **Access:** data are in the NASA PDS (PPI node, lro.crater PDS4 bundle; raw EDR data in the PDS3 archive). data.gov catalog entries list "restricted public" access with no license. Check PDS terms before any redistribution.
 
 ## Ground-based beam and source calibration
 - **What:** lab sources (Sr-90, Cs-137) are the practical calibration tool for the prototype. Beam facilities for heavy-ion testing would be needed for SEU cross-section validation.

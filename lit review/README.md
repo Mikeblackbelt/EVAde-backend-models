@@ -13,4 +13,4 @@ Working notes on the five areas Blindsight depends on, plus a folder of data sou
 
 ## Verification status
 
-Bibliographic details (authors, journal, volume, pages, DOI) were checked against search results in this pass. Findings from abstracts and press summaries were also checked where possible. Full texts were not opened for most papers, so specific numbers should be re-checked against the paper before they go into a report. Items marked **UNRESOLVED** have conflicting sources.
+A verification pass (second round) checked the key citations and dataset access terms against search results, abstracts, and press releases. Full texts were mostly not accessible (publisher pages returned 403s or redirects), and some DOIs remain unconfirmed; the bibliography entries still say so where that applies. Specific numbers must be re-checked against the paper before they go into a report. Items marked **UNRESOLVED** or **UNVERIFIABLE** have conflicting or missing sources.

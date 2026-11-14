@@ -13,18 +13,18 @@
 - **Limit:** the search results found mostly animal bone datasets. Human DXA or QCT availability needs direct confirmation.
 
 ## MrOS (Osteoporotic Fractures in Men) and SOF (Study of Osteoporotic Fractures)
-- **What:** large prospective cohorts of older adults with DXA, QCT, and HR-pQCT scans, fracture outcomes, and in MrOS a sleep sub-study (n = 3,135 per the MrOS Online listing).
-- **Access:** MrOS Online is public to registered users who accept its data use agreement. SOF access is through its own data-request process; not checked in this pass. NSRR hosting was not confirmed.
+- **What:** large prospective cohorts of older adults with DXA, QCT, and HR-pQCT scans and fracture outcomes. MrOS also has a sleep sub-study. The enrollment figure of 3,135 is **UNVERIFIABLE**; NSRR lists 2,907 men with visit-1 PSG.
+- **Access:** MrOS Online is public to registered users who accept its data use agreement. MrOS sleep data are hosted on sleepdata.org (NSRR). SOF materials are requested through the NIA Aging Research Biobank ("Request for Materials"); the ancillary-study process was not confirmed.
 - **Use:** calibration of a longitudinal bone-loss model and validation of portable proxies against DXA. Older male population is the MrOS limit; SOF is women.
 - **Limit:** these are not spaceflight cohorts. Use them for measurement validation, not for the mission-loss rate.
 
 ## NHANES (CDC)
 - **What:** national survey with DXA scans in a subset of participants, plus demographic and fitness covariates.
-- **Access:** public, no application needed. Confirm the DXA module years on the CDC site before use.
+- **Access:** public, no application needed. Whole-body DXA began in the 1999 cycle (ages 8+); lumbar spine DXA began in 2005; a 2017-2018 spine file exists. Confirm the full list of DXA cycles on the CDC site.
 - **Use:** reference distributions of BMD by age, sex, and ethnicity for normative comparisons.
 - **Limit:** cross-sectional, not longitudinal.
 
 ## UK Biobank
 - **What:** large cohort with imaging and health records, including bone measures in a subset.
-- **Access:** application required, with fees and data-use terms. Not checked in this pass.
+- **Access:** via the Research Analysis Platform; bulk downloads are exceptional. Imaging-tier fee £9,000 + VAT for 3 years; £500 + VAT for eligible students (data-only). Whether DXA is platform-only is unclear. Fee figures are from search-result text, not the fees page.
 - **Use:** large-sample validation of portable proxies, if access is granted.
