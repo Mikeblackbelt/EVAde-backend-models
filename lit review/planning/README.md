@@ -1,0 +1,56 @@
+# Planning: Automatic Risk Score and Days to Return
+
+**Status: theoretical design. No code, no validation, not clinical guidance.** Every number below is a design parameter chosen so the system is concrete and testable. Some are anchored in the literature in this review; most are assumptions to be elicited from experts and calibrated on data later. The parameter register at the end says which is which.
+
+## What this plans
+
+Two automatically computed outputs per crew member, refreshed on a schedule, with human review:
+
+| Output | Definition | Range |
+|---|---|---|
+| **Risk score R** | Estimated overall health risk that a clinician would recommend intervention or return planning within the next 14 days | open interval (0, 1), never exactly 0 or 1 |
+| **Days to return (DTR)** | Recommended latest time to return to Earth (or to definitive care) given the current risk, its trend, and hard exposure limits | displayed as **"<5"**, a number from 5 to 100, or **">100"** |
+
+**Interpretation taken:** "days to return" means days until the person should be back on Earth. The alternative reading, days until a person returns to duty after an event, is a different model (a recovery-time estimate) and is not planned here.
+
+## Files
+
+| File | Contents |
+|---|---|
+| [risk-score.md](risk-score.md) | Five domains, anchor tables, aggregation formula, overrides, data-quality handling, bands, actions |
+| [days-to-return.md](days-to-return.md) | The DTR formula, trend adjustment, hard-limit times, logistics floor, intervals, display rules |
+| [worked-examples.md](worked-examples.md) | Three scenarios computed by hand, plus single-domain sensitivity |
+| [calibration-and-validation.md](calibration-and-validation.md) | How the numbers would be fitted and tested, targets, failure modes, governance |
+
+## Design principles
+
+1. **Personal baselines first.** Most inputs are deviations from the person's own baseline, not population norms. Individual variation in confinement is large (Mars-500 crew responses ranged from none to persistent insomnia), so a fixed population threshold is the wrong model.
+2. **One feature, one domain.** No raw feature feeds two domains, so nothing is double counted. HRV feeds the behavioral stress component only. The cardiac domain uses heart rate, rhythm, SpO2, and respiration.
+3. **Single failures do not hide, and do not alone hit critical.** The aggregation blends a weighted average with the worst domain. A single fully failed domain lands in the "high" band; reaching "critical" needs two severe domains or a hard-rule override.
+4. **Missing data is not good news.** A domain with poor data is scored at least 0.30 and flagged low-confidence.
+5. **Weak evidence gets a cap.** EEG affective markers are near zero effect in large samples, so they run in shadow mode. Wrist SpO2 carries known skin-tone bias, so its uncertainty is widened. Portable bone proxies are unvalidated, so bone is capped unless measured.
+6. **Humans decide.** R and DTR are decision support. Nothing triggers action autonomously. Hard-rule overrides escalate to a clinician; they do not take clinical action.
+
+## Parameter register
+
+| Parameter | Value | Basis |
+|---|---|---|
+| Risk label horizon | 14 days | design assumption |
+| Domain weights | cardiac 0.25, behavioral 0.25, neuro 0.15, radiation 0.20, bone 0.15 | design assumption, to be elicited |
+| Blend of mean and max | 0.6 mean + 0.4 max | design assumption |
+| Logistic midpoint, slope | x0 = 0.45, k = 8 | design assumption |
+| Risk band edges | 0.2, 0.4, 0.6, 0.8 | design assumption |
+| PHQ-9 anchors | 5, 10, 15, 20 | literature (Kroenke 2001 severity bands) |
+| GAD-7 anchors | 5, 10, 15 | literature (Spitzer 2006) |
+| Career dose limit | 600 mSv | literature, from the radiation research notes (NASA-STD-3001 Vol. 1 Rev B); verify the current revision |
+| Per-event solar particle limit | 250 mSv | literature, from the same notes; verify |
+| Deep-space cruise dose rate | 1.8 mSv/day | literature (Hassler 2014, MSL cruise) |
+| In-flight sleep, typical | about 6 h/night | literature (Barger 2014, press-reported figure) |
+| Hip bone strength loss (finite element) | 2.0-2.6 %/month | literature, from the bone research notes; verify |
+| Areal BMD loss prior | about 1 %/month | literature range 0.4-1.8 %/month depending on measure and site |
+| DTR curve | 150 days x (1 - R)^1.5 | design assumption |
+| Trend penalty | exp(-5 x max(0, change in R over 7 days)) | design assumption |
+| Dose safety margin | 25 mSv | design assumption (about 4% of 600) |
+| Return-vehicle lead time L | scenario-specific (examples in days-to-return.md) | assumption per mission architecture |
+
+Literature values marked "verify" come from subagent research summaries and have not been re-checked in full text.
