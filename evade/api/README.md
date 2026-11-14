@@ -13,6 +13,15 @@ export EVADE_ALLOW_DRAFT=1                         # serve the beta (draft) mode
 uvicorn evade.api.app:app --host 127.0.0.1 --port 8000
 ```
 
+With Docker (models mounted read-only, never baked into the image):
+
+```
+docker build -t evade-api .
+docker run -p 8000:8000 -e EVADE_API_TOKEN=<token> -e EVADE_CORS_ORIGINS=https://<frontend>            -e EVADE_ALLOW_DRAFT=1 -v /path/to/evade_train_beta:/models:ro evade-api
+```
+
+Put it behind HTTPS (for example a Cloudflare Tunnel or proxy); the token travels in a header.
+
 Every request except `GET /v1/health` needs `Authorization: Bearer <token>`. Interactive docs are at `/docs` (OpenAPI).
 
 ## Endpoints
