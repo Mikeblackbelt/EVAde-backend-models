@@ -117,6 +117,10 @@ Status labels: **VERIFIED** = bibliographic record and abstract (or proceedings 
 | Bone trend | empirical longitudinal model | mechanistic arm (comparison) | none |
 | Uncertainty | temperature scaling | conformal intervals | none |
 
+## 10a. Serving constraints
+
+Models exposed through the FastAPI service must fit the latency and memory budget in [planning/implementation-pipeline.md](../planning/implementation-pipeline.md) (design: ECG and EEG windows at or below 500 ms median on the target host). Prefer the Stage 1 and 2 entries above for first deployment; Stage 3 models are research arms until they meet the budget and external validation. Each served model needs an `EVA-[n]` registry entry.
+
 ## 11. Limitations
 
 - No architecture was trained or evaluated here; all performance numbers are the cited papers' own and mostly come from non-wearable data.

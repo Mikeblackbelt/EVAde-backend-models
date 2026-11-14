@@ -70,6 +70,10 @@ Open design choices: how to handle clock drift between devices, whether the radi
 
 Regulatory context is summarized in [behavioral-health/instruments-and-governance.md](behavioral-health/instruments-and-governance.md): the FDA general wellness guidance (reissued 6 Jan 2026) treats stress, sleep, and mental-acuity claims as lower risk and disease claims as device territory; the FDA pulse oximeter draft guidance (7 Jan 2025) was not found to be finalized; and EU AI Act high-risk dates were amended to 2 Dec 2027 (Annex III) and 2 Aug 2028 (Annex I). This is context, not legal advice. Get qualified advice before any use beyond research.
 
+## 5a. Serving layer
+
+Models reach the frontend and cloud services through a stateless FastAPI service with endpoints `/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, and `/predict/risk`. Every response carries model ID (`EVA-[n]`), data version, quality index, and uncertainty; low-quality windows return no value. Only models with a registry entry and a subject-wise evaluation are served. Details, CORS and authentication choices, and the latency budget are in [planning/implementation-pipeline.md](planning/implementation-pipeline.md).
+
 ## 6. Privacy and governance
 
 - Treat all physiological and behavioral data as sensitive and identifiable, especially in small cohorts.
