@@ -47,14 +47,17 @@ A falling R does not lengthen the DTR beyond the base curve. A rising R shortens
 | **T_rad** | (A_rem - 25) / d_rate | A_rem = remaining career allowance in mSv (600 minus dose already taken). d_rate = 7-day mean dose-equivalent rate in mSv/day. 25 mSv is the safety margin. |
 | **T_bone** | (10 - L) / r | L = current estimated areal BMD loss in percent; r = trailing 90-day slope in percent per day. No limit if r is at most 0.01 percent/day (about 0.3 percent/month). |
 | **T_acute** | 0.5 day | applies only while an override O2, O3, O4, or O5 is active |
+| **T_extreme** | min over eligible domains of (9 - 35 x (s_d - 0.80)) days, for s_d at or above 0.80 | 9 days at s_d = 0.80, falling linearly to 2 days at s_d = 1.0. Guarantees DTR below 10 days whenever any domain is extremely high. Eligible domains: Q_d at least 0.5 and not a shadow-mode input (EEG affective markers, unvalidated wrist SpO2). No limit if no eligible domain reaches 0.80. |
 
 Example for T_rad: remaining allowance 200 mSv at the deep-space cruise rate of 1.8 mSv/day gives (200 - 25) / 1.8 = 97 days. At the Mars-surface rate of 0.67 mSv/day the same allowance gives 261 days. (Rates from Hassler 2014; the 600 mSv limit from the radiation research notes, to be re-verified.)
+
+Example for T_extreme: neuro at s = 0.90 gives 9 - 35 x 0.10 = 5.5 days, even if the other domains are normal and R is moderate. A domain this high should be a measured event (for example a confirmed seizure burst or a very high dose), so the cap is intended to fire rarely; for bone, s_d near 1.0 would mean a measured fracture-level loss, since a trend proxy alone is capped below it.
 
 Example for T_bone: current loss 4% and a trailing slope of 1 percent per month (0.033 percent/day) gives (10 - 4) / 0.033 = 180 days.
 
 ## 4. Combined DTR
 
-1. DTR_calc = min( DTR_R x m_trend, T_rad, T_bone, T_acute ).
+1. DTR_calc = min( DTR_R x m_trend, T_rad, T_bone, T_acute, T_extreme ).
 2. **Logistics floor L:** L is the earliest feasible time to deliver the person to definitive care, set by mission architecture. Illustrative assumptions only: low Earth orbit 0.5 day; lunar distance 6 days; Mars transit 200 days.
 3. If DTR_calc is less than L, the system outputs the status **"return window cannot be met"** and recommends treating in place and requesting support. The displayed DTR is L, not a number below it.
 4. Otherwise DTR_eff = DTR_calc.
@@ -65,7 +68,7 @@ Example for T_bone: current loss 4% and a trailing slope of 1 percent per month 
 - If DTR_eff is above 100: display **">100 days"**.
 - Otherwise: nearest 0.5 day below 10 days, nearest 1 day above 10 days.
 - **Rate limiter:** DTR may drop immediately when risk rises, but may rise by at most 20% per day when risk falls.
-- Show the driver: which of DTR_R, T_rad, T_bone, T_acute set the value.
+- Show the driver: which of DTR_R, T_rad, T_bone, T_acute, T_extreme set the value.
 
 ## 6. Uncertainty interval
 
@@ -83,5 +86,6 @@ where R_low and R_high are the 10th and 90th percentiles from the Monte Carlo dr
 | Data quality Q below 0.6 | mark DTR "provisional"; no value above 100 is shown as certain |
 | Override active, R_dtr floored to 0.80 | DTR_R = 13.4 days, then the override rule and T_acute apply |
 | Two severe domains (R above 0.9) | DTR_R below 5 days |
+| Any one eligible domain at s_d of 0.80 or more | T_extreme caps DTR below 10 days (2 days at s_d = 1.0); if L exceeds the cap the status is "return window cannot be met" |
 | R falls steadily | DTR rises through the rate limiter |
 | Missing logistics input L | refuse to display DTR; show R only |

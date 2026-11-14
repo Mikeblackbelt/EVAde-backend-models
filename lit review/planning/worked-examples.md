@@ -7,6 +7,7 @@ Recap:
 - L = sum of -ln(1 - p_d); R_agg = 0.005 + 0.99 x (1 - exp(-L)).
 - Flag: any validated domain with s_d at or above 0.30 gives displayed R = max(R_agg, 0.60). DTR uses R_agg (floored at 0.80 only by a hard-rule override).
 - DTR_R = 150 x (1 - R_dtr)^1.5.
+- T_extreme = 9 - 35 x (s_d - 0.80) days for any eligible domain at s_d of 0.80 or more (2 days at s_d = 1.0); it is part of the minimum in DTR_calc.
 
 ## One component calculation (behavioral domain, scenario B)
 
@@ -74,7 +75,8 @@ Seizure detected (confidence 0.95), solar particle event in progress, borderline
 - L = 2.192; R_raw = 0.888; **R = 0.005 + 0.99 x 0.888 = 0.884** (band: critical).
 - Override O4 (seizure) is active; its 0.80 floor is below the computed value, so R stays 0.884 and the override reason is displayed.
 - DTR_R = 150 x (0.116)^1.5 = 5.9 days. Assume R rose 0.40 in 7 days: m = exp(-2) = 0.135, giving 0.80 day. T_acute = 0.5 day.
-- DTR_calc = min(0.80, 0.5) = 0.5 day. Assume low Earth orbit with L = 0.5 day: DTR_calc equals L, so the return window is met only with no margin; displayed DTR = 0.5 day, shown as **"<5 days"**.
+- T_extreme: neuro at 1.00 gives 2.0 days and radiation at 0.85 gives 7.25 days, so T_extreme = 2.0 days (not binding here).
+- DTR_calc = min(0.80, 0.5, 2.0) = 0.5 day. Assume low Earth orbit with L = 0.5 day: DTR_calc equals L, so the return window is met only with no margin; displayed DTR = 0.5 day, shown as **"<5 days"**.
 - Escalation: immediate clinician contact and immediate crew and ground alert.
 
 ## Mechanics checks (equal influence, c = 1)
@@ -82,23 +84,25 @@ Seizure detected (confidence 0.95), solar particle event in progress, borderline
 | Case | p | R_agg | Displayed R | DTR basis |
 |---|---|---|---|---|
 | one domain at s = 0.5, rest at or below 0.10 | 0.333 | 0.335 | 0.60 (flag) | R_agg 0.335, DTR_R 81.3 days |
-| two domains at s = 0.8 | 0.583 each | 0.823 | 0.823 (critical) | DTR_R 11.2 days |
+| two domains at s = 0.8 | 0.583 each | 0.823 | 0.823 (critical) | DTR_R 11.2 days, but T_extreme = 9.0, so DTR = 9.0 days |
 | five domains at s = 0.2 with the c_d above | 0.083, 0.083, 0.050, 0.067, 0.050 | 0.294 | 0.294 (guarded), no flag | DTR_R 88.9 days |
 
 ## Single-domain sensitivity
 
 Baseline: all domains at s = 0.10, so every p = 0, R_agg = 0.005.
 
-Setting one domain to 1.0, others unchanged:
+Setting one domain to 1.0, others unchanged. T_extreme = 2.0 days for every row, so the DTR is 2.0 days regardless of the R-derived value:
 
-| Domain set to 1.0 | p | R_agg | Displayed R | DTR_R from R_agg (days) |
-|---|---|---|---|---|
-| cardiac (c 1.0) | 0.75 | 0.747 | 0.747 (high) | 19.0 |
-| behavioral (c 1.0) | 0.75 | 0.747 | 0.747 (high) | 19.0 |
-| radiation (c 0.8) | 0.60 | 0.599 | 0.60 (high, flag) | 38.1 |
-| neuro (c 0.6) | 0.45 | 0.451 | 0.60 (high, flag) | 61.1 |
-| bone (c 0.6) | 0.45 | 0.451 | 0.60 (high, flag) | 61.1 |
+| Domain set to 1.0 | p | R_agg | Displayed R | DTR_R from R_agg (days) | T_extreme (days) | DTR |
+|---|---|---|---|---|---|---|
+| cardiac (c 1.0) | 0.75 | 0.747 | 0.747 (high) | 19.0 | 2.0 | 2.0 |
+| behavioral (c 1.0) | 0.75 | 0.747 | 0.747 (high) | 19.0 | 2.0 | 2.0 |
+| radiation (c 0.8) | 0.60 | 0.599 | 0.60 (high, flag) | 38.1 | 2.0 | 2.0 |
+| neuro (c 0.6) | 0.45 | 0.451 | 0.60 (high, flag) | 61.1 | 2.0 | 2.0 |
+| bone (c 0.6) | 0.45 | 0.451 | 0.60 (high, flag) | 61.1 | 2.0 | 2.0 |
 
-Two domains at 1.0 (cardiac and behavioral): L = 2.773, R_agg = 0.933 (critical), DTR_R = 2.6 days.
+Intermediate case: neuro at s = 0.90 with others at 0.10 gives R_agg about 0.40 (DTR_R about 70 days) but T_extreme = 5.5 days, so DTR = 5.5 days.
 
-Interpretation: a single failed domain is a "high" alert through the flag (return planning starts), and two failed domains are "critical". Because DTR uses R_agg, a single failed lower-influence domain (neuro, bone) gives a long DTR of about 61 days while the alert is still raised. Any domain can be overridden to critical only through the hard-rule list.
+Two domains at 1.0 (cardiac and behavioral): L = 2.773, R_agg = 0.933 (critical), DTR_R = 2.6 days, T_extreme = 2.0, DTR = 2.0 days.
+
+Interpretation: a single failed domain is a "high" alert through the flag, and any domain at or above 0.80 forces DTR under 10 days through T_extreme. Two failed domains are "critical". If the logistics floor L is larger than the cap (for example 6 days at lunar distance), the status is "return window cannot be met". Any domain can be overridden to critical only through the hard-rule list.

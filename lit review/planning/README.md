@@ -18,7 +18,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 | File | Contents |
 |---|---|
 | [risk-score.md](risk-score.md) | Five domains, anchor tables, noisy-OR aggregation (version 2), flag, overrides, data-quality handling, bands, actions |
-| [days-to-return.md](days-to-return.md) | The DTR formula, trend adjustment, hard-limit times, logistics floor, intervals, display rules |
+| [days-to-return.md](days-to-return.md) | The DTR formula, trend adjustment, hard-limit times (including the extreme-domain cap), logistics floor, intervals, display rules |
 | [worked-examples.md](worked-examples.md) | Three scenarios computed by hand, plus single-domain sensitivity |
 | [implementation-pipeline.md](implementation-pipeline.md) | Three-stage build plan: data ingestion and preprocessing, model training, FastAPI endpoints (`/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`), CORS, Pydantic, latency budget, build order |
 | [calibration-and-validation.md](calibration-and-validation.md) | How the numbers would be fitted and tested, targets, failure modes, governance |
@@ -41,6 +41,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 | Dead zone, per-domain cap | 0.10, 0.75 | design assumption |
 | Noisy-OR map | R = 0.005 + 0.99 x (1 - exp(-L)) | design assumption (keeps R inside (0, 1)) |
 | Abnormal-component flag | domain s at or above 0.30; floors displayed R at 0.60; not applied to DTR; excludes low-data floors and shadow-mode inputs | design assumption |
+| Extreme-domain DTR cap | eligible domain s_d at or above 0.80: DTR at most 9 days, linear to 2 days at s_d = 1.0 | design assumption (requirement: any extremely high domain gives DTR under 10 days) |
 | Per-domain false-alarm budget | about 0.2 high-or-above alerts per person-month | design assumption (overall target of 1 divided across 5 domains) |
 | Risk band edges | 0.2, 0.4, 0.6, 0.8 | design assumption |
 | PHQ-9 anchors | 5, 10, 15, 20 | literature (Kroenke 2001 severity bands) |
