@@ -19,7 +19,7 @@ R is trained to match an adjudicated label: **"a clinician panel would recommend
 | 3. Refit | fit c_d (non-negative, at most 1), dead zone, and flag threshold by maximizing held-out likelihood of the 14-day label, with L2 penalty and subject-wise cross-validation; set a per-domain false-alarm target of about 0.2 high-or-above alerts per person-month so the five domains together meet the overall 1 per person-month | compare against the fixed expert values |
 | 4. External check | a second site or cohort that was not used in any fitting step | generalization result, including failures |
 
-Adoption rule for refit parameters: use them only if held-out log-loss improves by at least 5% over the expert values under subject-wise cross-validation; otherwise keep the expert values.
+Adoption rule for refit parameters: use them only if every fitness gate in [fitness-assessment.md](fitness-assessment.md) still passes under subject-wise cross-validation (calibration slope in range, sensitivity at the per-domain false-alarm budget not reduced, protocol metrics not worse than the expert values); otherwise keep the expert values. Log-loss may be the fitting objective but is not the acceptance test.
 
 ## 3. Targets (design goals)
 
