@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 .env
+
+# Datasets: never commit raw data (see data/README.md)
+data/*
+!data/README.md
+!data/MANIFEST.csv
