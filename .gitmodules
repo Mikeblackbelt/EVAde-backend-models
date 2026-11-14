@@ -1,0 +1,3 @@
+[submodule "external/Blindsight-Data-Nasa"]
+	path = external/Blindsight-Data-Nasa
+	url = https://github.com/ryanmarklin-arch/Blindsight-Data-Nasa.git
