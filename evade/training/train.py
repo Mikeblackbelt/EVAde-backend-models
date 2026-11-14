@@ -72,6 +72,22 @@ def normalize_per_person(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
+def operating_points(y, p, g, subs, fprs=(0.01, 0.02, 0.05, 0.10)) -> list[dict]:
+    """Threshold, subject-mean sensitivity and false-positive windows per hour at several pooled FPR targets."""
+    from . import metrics as M
+    out = []
+    for f in fprs:
+        thr = M.threshold_at_fpr(y, p, f)
+        sens, fp = [], []
+        for s in subs:
+            te = g == s
+            se, fr = M.sens_at(y[te], p[te], thr)
+            sens.append(se); fp.append(fr)
+        out.append({"target_fpr": f, "threshold": thr, "sensitivity_subject_mean": float(np.nanmean(sens)),
+                    "fp_windows_per_hour": float(np.nanmean(fp) * 1800.0)})
+    return out
+
+
 def smooth_by_record(p: np.ndarray, rec: np.ndarray, start: np.ndarray, w: int = SMOOTH_W) -> np.ndarray:
     """Centered moving average of window scores in time order within each recording (NaNs kept)."""
     out = np.array(p, dtype=float, copy=True)
@@ -145,7 +161,8 @@ def run_seizure(a) -> dict:
             "per_subject": per,
             "subject_auroc_ci": M.subject_bootstrap_ci([v["auroc"] for v in per.values()]),
             "subject_sensitivity_ci": M.subject_bootstrap_ci([v["sensitivity_at_thr"] for v in per.values()]),
-            "fp_windows_per_hour_at_thr": float(np.nanmean([v["fpr_at_thr"] for v in per.values()]) * 1800.0)}
+            "fp_windows_per_hour_at_thr": float(np.nanmean([v["fpr_at_thr"] for v in per.values()]) * 1800.0),
+            "operating_points": operating_points(y[m], oof[m], g[m], subs)}
     res["leave_one_subject_out_chbmit"] = out_cv
     final = fit(make_hgb(), X, y)
     if cache_s.exists():

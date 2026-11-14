@@ -48,7 +48,7 @@ curl -s -X POST localhost:8000/v1/predict/risk -H "Authorization: Bearer $EVADE_
 
 ## Sizes and the seizure model
 
-Requests are capped at 1 MB, which is about 30 s of 18-channel EEG at 250 Hz as JSON, so send EEG baselines in several calls. The beta seizure model (EVA-2) uses per-person feature normalization, so it runs for a user only after at least 30 four-second EEG windows (about 1 minute) have been sent to `/v1/baseline/eeg`; before that `/v1/predict/eeg` returns `needs_baseline`.
+Requests are capped at 1 MB, which is about 30 s of 18-channel EEG at 250 Hz as JSON, so send EEG baselines in several calls. The beta seizure model (EVA-2) uses per-person feature normalization, so it runs for a user only after at least 30 four-second EEG windows (about 1 minute) have been sent to `/v1/baseline/eeg`; before that `/v1/predict/eeg` returns `needs_baseline`. Its output has two levels: `review` (yellow, threshold at 5% window false-positive rate in cross-validation) and `suspect_seizure` (red, 1%). The probability also enters the neuro risk domain as a shadow input, so it raises R but cannot trip the abnormal-component flag or the extreme-domain MDTR cap by itself. Try it with `scripts/demo_replay.py`.
 
 ## Behavior rules (from the schema)
 

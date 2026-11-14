@@ -197,6 +197,22 @@ def eeg_window_metrics(w: S.Window):
                           "rel_theta": rel("theta"), "rel_alpha": rel("alpha")}, q, n_present
 
 
+def eeg_rows_metrics(feats: np.ndarray) -> list[dict]:
+    names = spectral_names()
+    i = {b: names.index(f"mean_rel_{b}") for b in ("theta", "alpha", "beta")}
+    return [{"theta_beta": r[i["theta"]] / max(r[i["beta"]], 1e-9), "rel_beta": r[i["beta"]], "rel_theta": r[i["theta"]],
+             "rel_alpha": r[i["alpha"]]} for r in feats]
+
+
+_NAMES: list[str] = []
+
+
+def spectral_names() -> list[str]:
+    if not _NAMES:
+        _NAMES.extend(spectral_features(np.zeros((1, 18, 1000)), 250.0, EEG_BANDS, config.BIPOLAR_NAMES)[1])
+    return _NAMES
+
+
 def window_comparisons(user_id: str, w: S.Window) -> list[dict]:
     if w.modality == "ecg":
         m, q = ecg_window_metrics(w)
@@ -300,6 +316,10 @@ def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
             continue
         if w.modality == "eeg":
             add_eeg_feature_baseline(body.user_id, feats)
+            for row in eeg_rows_metrics(feats):          # one observation per 4 s sub-window
+                for k, v in row.items():
+                    STATE.baselines.add(body.user_id, "eeg", k, float(v), quality=q, mode=body.mode, phase=body.phase)
+            continue
         for k, v in m.items():
             if v is not None and np.isfinite(v):
                 STATE.baselines.add(body.user_id, modality, k, float(v), quality=q, mode=body.mode, phase=body.phase)
@@ -398,11 +418,22 @@ def predict_eeg(body: S.EegRequest):
         X = np.clip((X - stats["med"]) / stats["mad"], -20, 20)       # same per-person normalization as training
         p = mdl["model"].predict_proba(X.astype(np.float32))[:, 1]
         p = np.convolve(p, np.ones(3) / 3, mode="same") if len(p) >= 3 else p   # 3-window smoothing as in training
-        thr = mdl["metrics"]["leave_one_subject_out_chbmit"]["hgb"]["threshold_at_1pct_fpr"]
+        hgb = mdl["metrics"]["leave_one_subject_out_chbmit"]["hgb"]
+        ops = {round(o["target_fpr"], 2): o["threshold"] for o in hgb.get("operating_points", [])}
+        t_red = ops.get(0.01, hgb["threshold_at_1pct_fpr"])
+        t_yellow = ops.get(0.05, t_red)
         pmax = float(p.max())
-        data["seizure"] = {"flag": "suspect_seizure" if pmax > thr else "none", "probability": round(pmax, 3),
-                           "threshold": round(thr, 3), "override_candidate": pmax >= 0.9,
+        lvl = "red" if pmax > t_red else "yellow" if pmax > t_yellow else "green"
+        data["seizure"] = {"flag": {"red": "suspect_seizure", "yellow": "review", "green": "none"}[lvl], "level": lvl,
+                           "probability": round(pmax, 3),
+                           "thresholds": {"review_5pct_fpr": round(t_yellow, 3), "suspect_1pct_fpr": round(t_red, 3)},
+                           "override_candidate": pmax > t_red,
                            "note": "beta draft model; never raises override O4 on its own, a human reviews"}
+        # feed the neuro domain as a shadow input: it raises R but cannot trip the flag or T_extreme alone
+        sc = {"red": 0.70, "yellow": 0.40, "green": 0.0}[lvl]
+        remember(body.user_id, [{"metric": "seizure_probability", "modality": "eeg", "domain": "neuro", "value": round(pmax, 3),
+                                 "level": lvl, "component_score": sc, "shadow": True, "confidence": "demo",
+                                 "unit": "probability", "quality_index": round(q, 3)}])
         ids.append(mdl["model_id"]); warn.append("draft model output")
     elif mdl and q >= 0.5:
         data["seizure"] = {"flag": None, "needs_baseline": True,

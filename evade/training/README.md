@@ -51,12 +51,24 @@ Data: CHB-MIT chb01-chb05 (all seizure files plus 3 seizure-free files per subje
 
 Per subject (boosted model): AUROC chb01 0.997, chb02 0.995, chb03 0.997, chb04 0.953, chb05 0.990.
 
+Operating points (boosted model, pooled out-of-fold CHB-MIT scores; false-positive windows per hour count overlapping 4 s windows with a 2 s step, so one minute of false activity is about 30 windows):
+
+| Target FPR | Threshold | Sensitivity, subject mean | FP windows per hour | Used by the API as |
+|---|---|---|---|---|
+| 1% | 0.988 | 0.35 | 8.8 | red, `suspect_seizure` |
+| 2% | 0.978 | 0.38 | 17.6 | - |
+| 5% | 0.192 | 0.80 | 51.4 | yellow, `review` |
+| 10% | 0.000 | 0.98 | 145 | - |
+
+Replay demo on an unseen Siena recording (PN00-1, seizure annotated at 1143-1213 s; `scripts/demo_replay.py` through the running API, 2 min baseline, 8 s requests): no flags in the 80 s before onset; `review` from 9 s after onset through the end of the seizure (probability up to 0.93) and into the post-ictal minute; two late `review` windows at 1280-1296 s. The 2 min baseline was too short: theta/beta stayed about 3 SD below it before the seizure, which is drift, not physiology.
+
 What changed the result: the first version, with features compared across people, gave pooled AUROC 0.839 (AP 0.04) and Siena AUROC 0.761, and its threshold collapsed to 1.0 because many scores tied there. Normalizing every feature within the person (median and MAD over that person's windows, which the API reproduces from the user's own EEG baseline), smoothing over 3 windows, and a tie-safe threshold produced the table above. The boosted model ranks windows better (AUROC); the linear baseline catches more seizure windows at the fixed threshold but with twice the false-positive windows, so neither dominates. Window-level sensitivity at 1% FPR is modest; event-level detection (any window of a seizure flagged) would be higher but was not computed. The earlier metrics are kept on the server as `metrics_v0_unnormalized.json`.
 
 ## Limits
 
 - Window-level seizure metrics, not event-based SzCORE scoring; false-positive windows per hour count overlapping windows, not alarms.
 - Seizure-free files are subsampled (3 per subject), so false-alarm rates are not representative of continuous monitoring.
+- Seizure training normalizes each person with all of that person's windows, including the roughly 1% that are ictal; the API normalizes with the user's baseline windows only, so live behavior may be somewhat worse than the table.
 - Few subjects everywhere; intervals are wide and the subject is the unit of generalization.
 - Terrestrial clinical data only (pediatric CHB-MIT, adult Siena, healthy Sleep-EDFx, hospital PTB-XL). Nothing here says how the models behave in spaceflight or on wearables.
 - Models output flags for human review; the API never lets a beta model raise an override on its own.
