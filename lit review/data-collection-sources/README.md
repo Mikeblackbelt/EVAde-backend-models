@@ -8,6 +8,7 @@ Where training and validation data for EVAde can come from, with access terms an
 | [eeg.md](eeg.md) | EEG seizure, sleep, and stress datasets |
 | [space-radiation.md](space-radiation.md) | Radiation measurements from spaceflight and planetary missions |
 | [bone-and-spaceflight.md](bone-and-spaceflight.md) | Bone density data from spaceflight and older-adult cohorts |
+| [additional-candidates.md](additional-candidates.md) | Further open datasets researched for gaps (stress wearables, sleep, EEG fatigue, BP and SpO2 PPG, large 12-lead ECG, solar particle flux), with a hackathon priority list |
 | [behavioral-health.md](behavioral-health.md) | Passive sensing, interview, EEG-affect, and questionnaire sources for behavioral health |
 
 ## Rules for all sources
