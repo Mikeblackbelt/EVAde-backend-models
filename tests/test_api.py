@@ -134,3 +134,24 @@ def test_device_bind_ingest_dedupe_and_isolation():
     d = C.post("/v1/ingest/batch", json={"user_id": a, "device_id": "polar-123", "seq": 3, "readings": [rd]}, headers=H).json()["data"]
     assert d["gap_before"] == 2
     assert C.post("/v1/ingest/batch", json={"user_id": b, "device_id": "polar-123", "seq": 9, "readings": [rd]}, headers=H).status_code == 404
+
+
+def test_delete_user_removes_everything_and_blocks_recreation():
+    uid = new_user()
+    C.post("/v1/baseline/ecg", json={"user_id": uid, "windows": [ecg_window(60, seed=i) for i in range(30)]}, headers=H)
+    C.post("/v1/devices/bind", json={"user_id": uid, "device_id": "dev-del-1", "kind": "hr_strap"}, headers=H)
+    assert C.delete(f"/v1/users/{uid}", headers=H).status_code == 200
+    from evade.api.app import STATE
+    assert STATE.baselines.for_user(uid) == [] and "dev-del-1" not in STATE.devices
+    STATE.baselines.add(uid, "ecg", "hr_bpm", 60.0)          # a late request must not recreate data
+    assert STATE.baselines.for_user(uid) == []
+    assert C.delete(f"/v1/users/{uid}", headers=H).status_code == 404
+
+
+def test_missing_content_length_rejected():
+    import json as _j
+    body = _j.dumps({"consent": True}).encode()
+    def gen():
+        yield body
+    r = C.post("/v1/users", content=gen(), headers={**H, "Content-Type": "application/json"})
+    assert r.status_code == 411

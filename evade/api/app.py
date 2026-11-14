@@ -36,6 +36,7 @@ from . import schemas as S
 
 API_VERSION = "0.1.0-beta"
 MAX_BODY = 1_000_000
+MAX_SEQ_JUMP = 100_000
 ACTIONS = {
     ("cardiac", "yellow"): ("Heart metrics above your baseline", ["Pause strenuous work if safe", "Re-check in 10 minutes at rest"]),
     ("cardiac", "red"): ("Heart metrics well above your baseline", ["Stop strenuous work", "Re-measure at rest", "Contact the flight surgeon if it persists"]),
@@ -111,8 +112,13 @@ async def _val_err(request: Request, exc: RequestValidationError):
 @app.middleware("http")
 async def _mw(request: Request, call_next):
     request.state.rid = uuid.uuid4().hex[:12]
-    if int(request.headers.get("content-length") or 0) > MAX_BODY:
-        return JSONResponse({"error": {"code": "payload_too_large", "message": "body over 1 MB"}}, status_code=413)
+    if request.method in ("POST", "PUT", "PATCH"):
+        cl = request.headers.get("content-length")
+        if cl is None or not cl.isdigit():
+            # no chunked uploads: the size cap must be checkable before the body is read
+            return JSONResponse({"error": {"code": "length_required", "message": "Content-Length header required"}}, status_code=411)
+        if int(cl) > MAX_BODY:
+            return JSONResponse({"error": {"code": "payload_too_large", "message": "body over 1 MB"}}, status_code=413)
     return await call_next(request)
 
 
@@ -139,6 +145,8 @@ def envelope(user_id: str | None, data: dict, model_ids: list[str] | None = None
 
 def remember(user_id: str, comps: list[dict]) -> None:
     with STATE.lock:
+        if user_id not in STATE.users:          # deleted while this request was running
+            return
         cur = STATE.latest.setdefault(user_id, {})
         for c in comps:
             cur[(c["modality"], c["metric"])] = c
@@ -244,11 +252,14 @@ def create_user(body: S.UserCreate):
 
 @app.delete("/v1/users/{user_id}", dependencies=[Depends(auth)])
 def delete_user(user_id: str):
-    user(user_id)
     with STATE.lock:
+        if user_id not in STATE.users:
+            raise err(404, "user_not_found", "unknown user_id", "user_id")
+        STATE.baselines.delete_user(user_id)     # tombstone first, so concurrent requests cannot recreate data
         for d in (STATE.users, STATE.latest, STATE.radiation, STATE.overrides, STATE.risk_history, STATE.inputs):
             d.pop(user_id, None)
-    STATE.baselines.delete_user(user_id)
+        for dev in [k for k, v in STATE.devices.items() if v["user_id"] == user_id]:
+            del STATE.devices[dev]
     return envelope(user_id, {"deleted": True})
 
 
@@ -379,6 +390,8 @@ def predict_radiation(body: S.RadiationRequest):
     o5 = body.spe_dose_msv >= 250 or proj >= 250
     t_rad = (600 - body.cumulative_dose_msv - 25) / body.dose_equivalent_rate_msv_per_day if body.dose_equivalent_rate_msv_per_day > 0 else None
     with STATE.lock:
+        if body.user_id not in STATE.users:
+            raise err(404, "user_not_found", "unknown user_id", "user_id")
         STATE.radiation[body.user_id] = {"domain": di, "cumulative": body.cumulative_dose_msv, "rate": body.dose_equivalent_rate_msv_per_day}
         if o5:
             STATE.overrides.setdefault(body.user_id, set()).add("O5")
@@ -465,7 +478,7 @@ def bind_device(body: S.DeviceBind):
     user(body.user_id)
     with STATE.lock:
         cur = STATE.devices.get(body.device_id)
-        if cur and cur["user_id"] != body.user_id:
+        if cur and cur["user_id"] != body.user_id and cur["user_id"] in STATE.users:
             raise err(409, "device_already_bound", "device is bound to another user; unbind it first", "device_id")
         STATE.devices[body.device_id] = {"user_id": body.user_id, "kind": body.kind, "vendor": body.vendor,
                                          "model": body.model, "firmware": body.firmware, "last_seq": -1,
@@ -496,22 +509,32 @@ def device_status(device_id: str, user_id: str):
 @app.post("/v1/ingest/batch", dependencies=[Depends(auth)])
 def ingest_batch(body: S.IngestBatch):
     user(body.user_id)
-    with STATE.lock:
+    def check():
         dev = STATE.devices.get(body.device_id)
         if not dev or dev["user_id"] != body.user_id:
             raise err(404, "device_not_found", "bind the device to this user first", "device_id")
+        if dev["last_seq"] >= 0 and body.seq - dev["last_seq"] > MAX_SEQ_JUMP:
+            raise err(422, "seq_jump_too_large", f"seq may advance by at most {MAX_SEQ_JUMP}", "seq")
+        return dev
+    with STATE.lock:
+        dev = check()
         if body.seq <= dev["last_seq"]:
+            return envelope(body.user_id, {"accepted": 0, "duplicates": 1, "next_seq_expected": dev["last_seq"] + 1})
+    # process first; the sequence number is committed only after the batch succeeded
+    comps = []
+    for w in body.windows:
+        comps += window_comparisons(body.user_id, w)
+    for r in body.readings:
+        comps.append(STATE.baselines.compare(body.user_id, r.modality, r.metric, r.value, quality=r.quality, unit=r.unit))
+    with STATE.lock:
+        dev = check()
+        if body.seq <= dev["last_seq"]:            # a concurrent request with the same seq won the race
             return envelope(body.user_id, {"accepted": 0, "duplicates": 1, "next_seq_expected": dev["last_seq"] + 1})
         gap = body.seq - dev["last_seq"] - 1 if dev["last_seq"] >= 0 else 0
         dev["gaps"] += max(gap, 0)
         dev["last_seq"], dev["last_seen"] = body.seq, datetime.now(timezone.utc).isoformat()
         if body.battery_pct is not None:
             dev["battery_pct"] = body.battery_pct
-    comps = []
-    for w in body.windows:
-        comps += window_comparisons(body.user_id, w)
-    for r in body.readings:
-        comps.append(STATE.baselines.compare(body.user_id, r.modality, r.metric, r.value, quality=r.quality, unit=r.unit))
     remember(body.user_id, comps)
     flagged = [c for c in comps if c["level"] != "green"]
     return envelope(body.user_id, {"accepted": len(body.windows) + len(body.readings), "duplicates": 0,

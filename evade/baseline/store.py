@@ -48,6 +48,7 @@ def _t(metric: str, v: float) -> float:
 @dataclass
 class Baseline:
     baseline_id: str
+    user_id: str
     modality: str
     metric: str
     mode: str = "demo"
@@ -81,11 +82,14 @@ class BaselineStore:
         self._b: dict[tuple, Baseline] = {}
         self._archive: list[Baseline] = []
         self._lock = threading.Lock()
+        self._deleted: set[str] = set()     # tombstones: never recreate data for a deleted user
 
     def _get(self, user_id: str, modality: str, metric: str, mode: str = "demo", phase: str = "demo") -> Baseline:
         k = (user_id, modality, metric)
+        if user_id in self._deleted:
+            return Baseline("deleted", user_id, modality, metric, mode, phase)   # not stored
         if k not in self._b:
-            self._b[k] = Baseline(f"b_{modality}_{uuid.uuid4().hex[:8]}", modality, metric, mode, phase)
+            self._b[k] = Baseline(f"b_{modality}_{uuid.uuid4().hex[:8]}", user_id, modality, metric, mode, phase)
         return self._b[k]
 
     def add(self, user_id: str, modality: str, metric: str, value: float, *, quality: float = 1.0,
@@ -150,9 +154,10 @@ class BaselineStore:
 
     def delete_user(self, user_id: str) -> None:
         with self._lock:
+            self._deleted.add(user_id)
             for k in [k for k in self._b if k[0] == user_id]:
                 del self._b[k]
-            self._archive = [b for b in self._archive if not b.baseline_id.startswith(user_id)]
+            self._archive = [b for b in self._archive if b.user_id != user_id]
 
 
 def domain_scores(comparisons: list[dict]) -> dict:
