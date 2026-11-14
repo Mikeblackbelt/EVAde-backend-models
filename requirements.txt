@@ -5,3 +5,5 @@ pyarrow
 wfdb
 pyedflib
 pytest
+scikit-learn
+joblib
