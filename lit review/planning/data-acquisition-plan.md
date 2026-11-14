@@ -1,6 +1,71 @@
 # Data Acquisition Plan by Modality
 
-**Status: plan only. Nothing has been downloaded, requested, or tested.** Any public research data is acceptable; NASA data is not required. TUSZ and the other Temple University corpora are **not** used in this plan; seizure work uses Siena, CHB-MIT, and SeizeIT2 instead. Per-source detail and caveats are in [data-collection-sources](../data-collection-sources/README.md). Status labels: VERIFIED (access page or record checked this session or earlier), PARTIAL (search summary only), UNVERIFIED (not checked; confirm before relying on it).
+**Status: plan only. Nothing has been downloaded, requested, or tested. Section 0 is the 2-day hackathon scope; the rest assumes time for credentialing and requests.** Any public research data is acceptable; NASA data is not required. TUSZ and the other Temple University corpora are **not** used in this plan; seizure work uses Siena, CHB-MIT, and SeizeIT2 instead. Per-source detail and caveats are in [data-collection-sources](../data-collection-sources/README.md). Status labels: VERIFIED (access page or record checked this session or earlier), PARTIAL (search summary only), UNVERIFIED (not checked; confirm before relying on it).
+
+## 0. Hackathon scope (2 days, no credentials, no approval waits)
+
+The rest of this file is the full plan. For a 2-day hackathon, use **only** sources you can download today without an account approval, and treat everything else as post-hackathon. Anything that needs a request, a credential, a data use agreement, or an application is out of scope.
+
+### Use these (instant or self-serve)
+
+| Modality | Dataset | Why | Check before relying on it |
+|---|---|---|---|
+| ECG | MIT-BIH Arrhythmia (PhysioNet, open) | QRS and beat baseline; small, fast | none; open, ODC Attribution |
+| ECG | PTB-XL (PhysioNet, open, CC BY 4.0) | rhythm classes; large enough for a 1D ResNet | file size before download |
+| PPG | BIDMC (PhysioNet, open) | HR and respiration with references | none |
+| rPPG | UBFC-rPPG (direct download, no formal license) | optional demo only | license unclear; fine for a hackathon demo, not for redistribution |
+| EEG seizure | Siena Scalp EEG (PhysioNet, open, CC BY 4.0) | adult seizures with ECG channels | only 14 subjects, so test with leave-one-subject-out |
+| EEG seizure | CHB-MIT (PhysioNet) | more seizures; pediatric | confirm it is open access on its page |
+| EEG seizure (optional) | SeizeIT2 (OpenNeuro, open BIDS) | wearable-style test set | size; license page |
+| EEG sleep or workload | Sleep-EDFx, EEG During Mental Arithmetic (PhysioNet, open) | drowsiness and workload features | none |
+| Stress and behavior | WESAD (direct download from the Siegen or UCI page) | stress label with ECG, EDA, accelerometer | 15 subjects only; non-commercial terms |
+| Radiation | MSL RAD and LRO CRaTER (NASA PDS, public); ISS series via OSDR RadLab (public GUI and API) | replay real dose-rate shapes through the radiation formula | file formats (PDS3 and PDS4); pick one small series |
+| Bone | NHANES DXA (CDC, public, no application) | reference BMD by age and sex | cycle file names; femur and spine in 2007-2010, 2013-2014, 2017-2020 |
+
+### Do not plan on these during the hackathon
+
+GLOBEM and any other PhysioNet **credentialed** set, NSRR (SHHS, MrOS sleep), MrOS and SOF, UK Biobank, NASA LSDA and LSAH, DAIC-WOZ, DEAP (EULA with institutional sign-off), MODMA (account and conditions unconfirmed), and any analog-mission data. Treat their absence as a stated limitation, not a blocker.
+
+### How each endpoint is covered without restricted data
+
+| Endpoint or domain | Hackathon approach |
+|---|---|
+| `/predict/ecg` | train or fine-tune on PTB-XL; QRS and HRV with MIT-BIH; test on a held-out set of subjects |
+| `/predict/eeg` | seizure flag from Siena plus CHB-MIT with leave-one-subject-out; if time is short, ship a features-plus-gradient-boosting model and skip deep nets |
+| `/predict/radiation-risk` | rule-based formula; replay one MSL RAD or ISS series plus synthetic solar particle event profiles as tests |
+| Behavioral domain | no depression or confinement data is available instantly. Use WESAD for a stress feature demo, and generate **synthetic** per-person trajectories (sleep, HRV, mood score) from the planning anchors to exercise the pipeline. Label it clearly as synthetic |
+| Bone domain | the prior from the literature (about 1 percent per month areal loss) with a user-entered scan; NHANES only for the reference table |
+| `/predict/risk` | the formulas in [risk-score.md](risk-score.md) and [days-to-return.md](days-to-return.md), driven by the worked examples and synthetic scenarios, since no outcome data exists |
+
+### 48-hour schedule (suggested)
+
+| Time | Task |
+|---|---|
+| Hours 0-2 | Download MIT-BIH, PTB-XL (or a subset), Siena, CHB-MIT subset, WESAD; write the manifest and subject-wise splits |
+| Hours 2-10 | Preprocessing for ECG and EEG; baseline models (rules for ECG, features plus trees for EEG) |
+| Hours 10-18 | FastAPI skeleton: `/health`, `/models`, schemas, CORS; radiation formula and replay test |
+| Hours 18-28 | `/predict/ecg` and `/predict/eeg` on baselines; `/predict/risk` from the formulas |
+| Hours 28-40 | Synthetic behavioral and bone inputs; integrate with the frontend and cloud layer; tests for the worked examples |
+| Hours 40-48 | One stronger model only if baselines are done (for example a 1D ResNet on PTB-XL); a demo script; write the limitations slide |
+
+### What to say in the demo
+
+State plainly: trained on open terrestrial datasets, no spaceflight data, behavioral and bone inputs are simulated, and outputs are flags for human review, not diagnoses. This is accurate and judges tend to prefer it over an overclaimed number.
+
+### Reduced task list
+
+| # | Action | Time |
+|---|---|---|
+| 1 | Download the open sets above; save checksums | 1-2 h |
+| 2 | Record each license in a one-page register | 30 min |
+| 3 | Fix subject-wise splits; write the loaders | 2 h |
+| 4 | Pick one MSL RAD or ISS dose series for the radiation test | 1 h |
+| 5 | Write the synthetic behavioral and bone generators | 2 h |
+| 6 | Record the credentialed sources as "future work" in the README | 15 min |
+
+Anything below this point in the file is the full plan for after the hackathon.
+
+## Full plan (post-hackathon)
 
 ## 1. Summary table
 
