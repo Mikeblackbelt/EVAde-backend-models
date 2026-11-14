@@ -96,6 +96,7 @@ Input validation: Pydantic ranges per field; timestamps in UTC; reject future ti
 | `/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk` | POST | as before, now accept `user_id` and return the comparison fields next to the model output |
 | `/ws?user_id=...` | WebSocket | the prototype's live stream, keyed by user so the baseline persists across reconnects |
 | `/input/*` | POST | section 4 |
+| `/devices/bind`, `/ingest/batch`, `/ingest/stream` | POST, POST, WebSocket | Bluetooth device binding and data ingest; see [bluetooth-device-integration.md](bluetooth-device-integration.md) |
 
 Rules: a request without a valid `user_id` is rejected; the action log and every stored record are keyed by `user_id`; responses carry `baseline_id` and the pipeline version; nothing returns another user's data.
 

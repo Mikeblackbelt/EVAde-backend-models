@@ -22,6 +22,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 | [worked-examples.md](worked-examples.md) | Three scenarios computed by hand, plus single-domain sensitivity |
 | [data-acquisition-plan.md](data-acquisition-plan.md) | Per-modality data sources (public research data, no TUSZ), a 2-day hackathon scope using only instant-download data, access steps, gaps, and an action checklist |
 | [baseline-comparison.md](baseline-comparison.md) | Per-user baseline-vs-current comparison for all modalities, unique `user_id` in every API call, user input, and integration with the Blindsight-Data-Nasa prototype (submodule) |
+| [bluetooth-device-integration.md](bluetooth-device-integration.md) | Bluetooth Low Energy wearables to the API: client options, device and profile matrix, pairing and binding to `user_id`, ingest protocol, BLE failure handling, hackathon plan |
 | [implementation-pipeline.md](implementation-pipeline.md) | Three-stage build plan: data ingestion and preprocessing, model training, FastAPI endpoints (`/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`), CORS, Pydantic, latency budget, build order |
 | [calibration-and-validation.md](calibration-and-validation.md) | How the numbers would be fitted and tested, targets, failure modes, governance |
 

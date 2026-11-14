@@ -71,6 +71,7 @@ Libraries named in the task (pandas, NumPy, SciPy) cover this stage; domain libr
 | `/predict/radiation-risk` | POST | dose-rate or dose samples, SEU count, solar-particle-event flag, cumulative dose to date | radiation domain score in [0, 1], remaining-dose margin, confidence, rule version |
 | `/predict/risk` | POST | latest domain scores or raw features for one participant | R in (0, 1), band, DTR display ("<5", 5-100, ">100"), top contributing domains |
 | all `/predict/*` | POST | every call also carries a unique `user_id`; baseline comparison fields are returned with the prediction (see [baseline-comparison.md](baseline-comparison.md)) |
+| `/devices/bind`, `/ingest/batch`, `/ingest/stream` | POST, POST, WebSocket | Bluetooth sensor data from a client near the person ([bluetooth-device-integration.md](bluetooth-device-integration.md)) |
 | `/models` | GET | none | registry IDs, status, and data version of every served model |
 | `/health` | GET | none | liveness, model load state, version |
 
