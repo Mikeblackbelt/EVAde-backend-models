@@ -35,7 +35,7 @@ GLOBEM and any other PhysioNet **credentialed** set, NSRR (SHHS, MrOS sleep), Mr
 | `/predict/radiation-risk` | rule-based formula; replay one MSL RAD or ISS series plus synthetic solar particle event profiles as tests |
 | Behavioral domain | no depression or confinement data is available instantly. Use WESAD for a stress feature demo, and generate **synthetic** per-person trajectories (sleep, HRV, mood score) from the planning anchors to exercise the pipeline. Label it clearly as synthetic |
 | Bone domain | the prior from the literature (about 1 percent per month areal loss) with a user-entered scan; NHANES only for the reference table |
-| `/predict/risk` | the formulas in [risk-score.md](risk-score.md) and [days-to-return.md](days-to-return.md), driven by the worked examples and synthetic scenarios, since no outcome data exists |
+| `/predict/risk` | the formulas in [risk-score.md](risk-score.md) and [max-days-to-return.md](max-days-to-return.md), driven by the worked examples and synthetic scenarios, since no outcome data exists |
 
 ### 48-hour schedule (suggested)
 
@@ -123,7 +123,7 @@ Anything below this point in the file is the full plan for after the hackathon.
 - **Confinement:** Mars-500, NEK, LunAres, and HI-SEAS data were not found public. Ask the authors (Basner and colleagues) and the sponsoring institutes; this is the most important unmet need.
 - **Do:** complete the PhysioNet credentialing, apply for GLOBEM, define the shared behavioral feature set so GLOBEM features map to the planned features (sleep duration, activity, HRV), and write the analog-data request.
 
-### Aggregate risk score and DTR
+### Aggregate risk score and MDTR
 - No public data has the outcome labels the risk score needs. Plan: (1) simulation of 2,000 crew-missions for behavior and alert rates, (2) expert elicitation of parameters, (3) a terrestrial analog pilot, per [calibration-and-validation.md](calibration-and-validation.md). Public datasets validate individual modules only.
 
 ## 3. What needs to be done (checklist)

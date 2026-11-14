@@ -1,6 +1,6 @@
 # Literature Review
 
-Working notes on the six areas Blindsight depends on (radiation, vital signs, ECG, EEG, bone health, behavioral health), a cross-cutting integration and evaluation document, and a folder of data sources. No code yet. Each topic folder holds a summary, verified sources, and concrete implementation steps. `data-collection-sources/` lists where training and validation data can come from, with access terms.
+Working notes for **EVAde**, a space health monitoring platform, on the six areas the backend depends on (radiation, vital signs, ECG, EEG, bone health, behavioral health), a cross-cutting integration and evaluation document, model architectures, theory-only planning, and a folder of data sources. **No code yet.** Each topic folder holds a summary, labeled sources, and concrete implementation steps. `data-collection-sources/` lists where training and validation data can come from, with access terms. `planning/` holds the risk score, maximum days to return, data acquisition (including the 2-day hackathon scope), per-user baseline comparison, and Bluetooth plans. The whole set is also in [lit-review.pdf](lit-review.pdf).
 
 | Folder | Topic |
 |---|---|
@@ -11,7 +11,7 @@ Working notes on the six areas Blindsight depends on (radiation, vital signs, EC
 | [bone-health-metrics](bone-health-metrics/README.md) | Bone density, fracture risk, and bone loss in spaceflight |
 | [behavioral-health](behavioral-health/README.md) | Mood, anxiety, stress, sleep, and alertness monitoring in isolation and confinement |
 | [model-architectures](model-architectures/README.md) | Candidate model architectures per module, with verified sources and the `EVA-[n]` ID scheme |
-| [planning](planning/README.md) | Theoretical design for an automatic risk score in (0,1) and days to return (under 5 to over 100), plus the implementation pipeline (ingestion, training, FastAPI serving) |
+| [planning](planning/README.md) | Theoretical design for an automatic risk score in (0,1) and maximum days to return (under 5 to over 100), plus the implementation pipeline (ingestion, training, FastAPI serving) |
 | [integration-and-evaluation.md](integration-and-evaluation.md) | Shared schema, evaluation protocol, risks, and phasing across all areas |
 | [data-collection-sources](data-collection-sources/README.md) | Public and controlled datasets, with license and access notes |
 

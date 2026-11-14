@@ -16,7 +16,7 @@ Every retained model architecture and trained model in this repository gets a un
 5. **Written as `EVA-n`** with no zero padding (`EVA-7`, `EVA-112`). Use the ID in filenames, model cards, logs, and result tables (for example `EVA-7_model_card.md`).
 6. **Candidates are not numbered.** Architectures listed in [lit review/model-architectures](lit%20review/model-architectures/README.md) are candidates until someone creates one. They receive an ID when the spec or the trained artifact is first committed.
 7. **No ID for throwaway experiments.** A scratch run that is not retained does not get an ID. Anything cited in a result table, report, or comparison must have one.
-8. **Required for every row:** the git commit, the data version, the split version, the evaluation protocol, and the headline metric with a confidence interval. A model with no subject-wise evaluation is registered with `Status = draft` and may not be reported as a result.
+8. **Required for every row:** the git commit, the data version, the split version, the evaluation protocol, and the headline metric with a confidence interval. The headline metric is the module's established protocol metric (see [fitness-assessment.md](lit%20review/planning/fitness-assessment.md)), not a training loss. A model with no subject-wise evaluation is registered with `Status = draft` and may not be reported as a result.
 
 ## Status values
 

@@ -17,7 +17,7 @@ Heart rate (HR), respiration rate (RR), and blood oxygen saturation (SpO2) come 
 - **ISO 80601-2-61:2017** (ARMS criterion of 4% or less consistent across sources). A 2026 edition appears to exist; contents are UNVERIFIED (secondary sources only). The standard covers contact oximeters, so camera and wrist consumer sensors would not be certified under it, but they should borrow its ARMS metric and desaturation protocol.
 - **rPPG and wearable PPG across tones:**
   - Nowara, McDuff & Veeraraghavan (2020), CVPR Workshops, 1148-1155, DOI 10.1109/CVPRW50498.2020.00150 (PARTIAL): three datasets, 73 people; accuracy dropped notably for the darkest skin type under some conditions.
-  - Dasari et al. (2021), *npj Digit Med*, 4, 91, DOI 10.1038/s41746-021-00462-z (VERIFIED): rPPG methods showed similar biases across demographic groups and environments in new data from India and Sierra Leone. **The two papers disagree; test under Blindsight's own lighting.**
+  - Dasari et al. (2021), *npj Digit Med*, 4, 91, DOI 10.1038/s41746-021-00462-z (VERIFIED): rPPG methods showed similar biases across demographic groups and environments in new data from India and Sierra Leone. **The two papers disagree; test under EVAde's own lighting.**
   - Bondarenko, Menon & Elgendi (2025), *npj Digit Med*, 8, 593, DOI 10.1038/s41746-025-01973-9 (VERIFIED): audit of 100 rPPG studies found darker skin tones and gender balance underrepresented in public datasets.
   - Bent et al. (2020), *npj Digit Med*, 3, 18, DOI 10.1038/s41746-020-0226-6 (VERIFIED; sample size unconfirmed): no significant HR accuracy difference across skin tones for wearables, but error was about 30% higher during activity than at rest.
 - **Gap:** no fairness-methods paper for rPPG was verified, and no peer-reviewed, large-n camera-SpO2 study with tone stratification (only preprints).
@@ -47,7 +47,7 @@ Heart rate (HR), respiration rate (RR), and blood oxygen saturation (SpO2) come 
 2. Define claim level per signal: HR and RR for wellness; SpO2 and rhythm alerts as research-only until validated. Re-check the FDA draft status and obtain the ISO 80601-2-61:2026 text.
 3. Build a tone-stratified validation cohort: record objective skin tone (colorimeter) plus the Monk scale; for any SpO2 claim, follow a design like the FDA draft (at least 150 participants, three groups, about 25% each); report error per stratum, never pooled.
 4. Report agreement with Bland-Altman bias and 95% limits of agreement, MAE, and tail metrics (for example false-reassurance at SpO2 92-96%).
-5. Run candidate rPPG models (TS-CAN, PhysFormer, RhythmFormer) in rPPG-Toolbox with identical preprocessing; train on one dataset and test on others (PURE, UBFC, MMPD, VIPL-HR, SCAMPS); treat MMPD and Blindsight's own phone data as the hard tests.
+5. Run candidate rPPG models (TS-CAN, PhysFormer, RhythmFormer) in rPPG-Toolbox with identical preprocessing; train on one dataset and test on others (PURE, UBFC, MMPD, VIPL-HR, SCAMPS); treat MMPD and EVAde's own phone data as the hard tests.
 6. Add synthetic pretraining (SCAMPS) and tone-balanced augmentation, then re-measure per-tone error; collect your own darker-skin, low-light, and motion data.
 7. Implement and report signal-quality indices for contact PPG and camera (template matching, SNR, perfusion); publish the percentage of valid time by activity, tone, and posture; suppress output below threshold.
 8. For wearable HR and HRV-like measures, test at rest, graded exercise, and free-living against a chest strap or ECG; call it pulse rate variability unless validated.
@@ -62,7 +62,7 @@ Heart rate (HR), respiration rate (RR), and blood oxygen saturation (SpO2) come 
 
 ## 7. Limitations and open questions
 
-- Is Blindsight SpO2 intended for medical use? That decides whether FDA and ISO 80601-2-61 apply or only the general-wellness path.
+- Is EVAde SpO2 intended for medical use? That decides whether FDA and ISO 80601-2-61 apply or only the general-wellness path.
 - What is the final FDA status of the pulse oximeter guidance, and what does ISO 80601-2-61:2026 require?
 - Fairness methods for rPPG and rigorous camera-SpO2 evidence with tone stratification are not verified.
 - Unverified items to chase: the PhysNet BMVC 2019 record; "Empaviot" (not found); 2020+ TUSZ benchmark papers; ECG denoising reviews.

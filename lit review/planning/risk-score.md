@@ -89,10 +89,10 @@ Version 2 replaces the earlier weighted-mean, worst-domain, and logistic blend. 
 4. **Abnormal-component flag.** If any domain has s_d at or above 0.30, set `flag = true` and display R = max(R_agg, 0.60). That is the bottom of the "high" band. Three conditions apply:
    - Only domains with Q_d at least 0.5 can trip the flag. A domain raised to the 0.30 missing-data floor is marked "low confidence" and does **not** trip the flag.
    - **Shadow-mode inputs** (EEG affective markers, wrist SpO2 until validated) are excluded from the flag test: the test uses s_d recomputed without them. They still contribute to p_d through the normal path, capped as before.
-   - The flag floor applies to the **displayed R and band**, not to DTR (see below).
-5. **Hard-rule overrides** (section 4) floor both displayed R and R used for DTR at 0.80.
+   - The flag floor applies to the **displayed R and band**, not to MDTR (see below).
+5. **Hard-rule overrides** (section 4) floor both displayed R and R used for MDTR at 0.80.
 
-Two values leave this stage: **R_disp** = max(R_agg, 0.60 if flag, 0.80 if override), used for band, action, and display; and **R_dtr** = max(R_agg, 0.80 if override), used by [days-to-return.md](days-to-return.md). The decoupling avoids capping DTR near 38 days whenever a single component is abnormal (R = 0.60 would give 38 days).
+Two values leave this stage: **R_disp** = max(R_agg, 0.60 if flag, 0.80 if override), used for band, action, and display; and **R_mdtr** = max(R_agg, 0.80 if override), used by [max-days-to-return.md](max-days-to-return.md). The decoupling avoids capping MDTR near 38 days whenever a single component is abnormal (R = 0.60 would give 38 days).
 
 Properties: R_agg is monotonic in every s_d and strictly between 0.005 and about 0.995. Two domains at s = 0.8 with c = 1 give p = 0.583 each, L = 1.75, R_agg = 0.82 ("critical"); one domain at s = 0.5 with c = 1 gives p = 0.333, R_agg = 0.335, displayed 0.60 through the flag.
 
@@ -108,7 +108,7 @@ Properties: R_agg is monotonic in every s_d and strictly between 0.005 and about
 | O4 | seizure event with detector confidence at least 0.9 | immediate clinician review |
 | O5 | solar particle event dose at least 250 mSv, or projected to reach it within 24 h | immediate crew and ground alert |
 
-An override raises R to max(R, 0.80) for both display and DTR. It does not change the domain scores, so the display shows both the computed R_agg and the override reason.
+An override raises R to max(R, 0.80) for both display and MDTR. It does not change the domain scores, so the display shows both the computed R_agg and the override reason.
 
 ## 5. Data quality and confidence
 

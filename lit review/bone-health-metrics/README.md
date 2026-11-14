@@ -6,7 +6,7 @@ Status labels: **VERIFIED** = bibliographic record and abstract checked; **PARTI
 
 Bone health is measured by areal BMD from DXA, volumetric BMD and finite element (FE) strength from QCT, and microarchitecture from HR-pQCT. In spaceflight, loss is site-dependent (lower limbs, pelvis, and spine lose; the skull gains), is **faster by FE strength than by DXA**, and is **incompletely recovered at one year** in many astronauts. DXA can show recovery while volumetric trabecular bone has not recovered. The first six months after return are the actionable window for reactivating remodeling at sites resorbed in flight. Resistive exercise (ARED) helps cortical bone and areal BMD more than trabecular bone, and the best human evidence for pharmacologic protection (alendronate plus ARED) is small and non-randomized. No portable proxy has been validated for spaceflight bone loss.
 
-For Blindsight, the useful output is a **longitudinal trend with uncertainty**, interpreted against the least significant change (LSC) of the measuring system, not a fracture-risk diagnosis.
+For EVAde, the useful output is a **longitudinal trend with uncertainty**, interpreted against the least significant change (LSC) of the measuring system, not a fracture-risk diagnosis.
 
 ## 2. Reconciling rate differences
 

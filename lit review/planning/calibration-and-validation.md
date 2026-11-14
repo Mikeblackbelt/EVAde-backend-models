@@ -19,7 +19,7 @@ R is trained to match an adjudicated label: **"a clinician panel would recommend
 | 3. Refit | fit c_d (non-negative, at most 1), dead zone, and flag threshold by maximizing held-out likelihood of the 14-day label, with L2 penalty and subject-wise cross-validation; set a per-domain false-alarm target of about 0.2 high-or-above alerts per person-month so the five domains together meet the overall 1 per person-month | compare against the fixed expert values |
 | 4. External check | a second site or cohort that was not used in any fitting step | generalization result, including failures |
 
-Adoption rule for refit parameters: use them only if held-out log-loss improves by at least 5% over the expert values under subject-wise cross-validation; otherwise keep the expert values.
+Adoption rule for refit parameters: use them only if every fitness gate in [fitness-assessment.md](fitness-assessment.md) still passes under subject-wise cross-validation (calibration slope in range, sensitivity at the per-domain false-alarm budget not reduced, protocol metrics not worse than the expert values); otherwise keep the expert values. Log-loss may be the fitting objective but is not the acceptance test.
 
 ## 3. Targets (design goals)
 
@@ -33,17 +33,17 @@ Adoption rule for refit parameters: use them only if held-out log-loss improves 
 | Stability to parameter changes | influence factors varied by plus or minus 50% each and anchors by plus or minus 20%: Spearman correlation of R at least 0.9 and no more than 10% of case windows change band |
 | Reliability | R changes by no more than 0.05 on re-computation with identical inputs and different random seeds |
 
-## 4. DTR validation
+## 4. MDTR validation
 
 There is no ground-truth data for "correct" return time, so validation is judgment-based first:
 
-- 30 clinical vignettes, each with a computed DTR; a flight-medicine panel gives its own recommended return time independently. Target: agreement within a factor of 2 on at least 80% of vignettes, and no vignette where the panel recommends return sooner than the displayed lower bound.
+- 30 clinical vignettes, each with a computed MDTR; a flight-medicine panel gives its own recommended return time independently. Target: agreement within a factor of 2 on at least 80% of vignettes, and no vignette where the panel recommends return sooner than the displayed lower bound.
 - Hard-limit checks: unit tests of T_rad and T_bone on synthetic dose and bone-loss trajectories, verifying the margin (25 mSv) and the no-limit condition for slow bone loss.
 - Back-test on any retrospective data obtainable; document the lack of data otherwise.
 
 ## 5. Sensitivity and robustness analyses
 
-- **One-at-a-time:** vary each weight, anchor, and exponent; plot R and DTR change.
+- **One-at-a-time:** vary each weight, anchor, and exponent; plot R and MDTR change.
 - **Missing data:** remove 30% of days at random and in blocks (sensor failure); verify the low-confidence flag and the 0.30 floor behave as intended.
 - **Artifacts:** inject motion, noise, and dose-rate spikes; verify the quality gates suppress false escalation.
 - **Subgroups:** report discrimination and calibration by sex, age group, and skin tone (for PPG-derived inputs).
@@ -61,12 +61,12 @@ There is no ground-truth data for "correct" return time, so validation is judgme
 | Radiation detector fault | false event or missed event | second detector cross-check; SEU-rate trust rule |
 | Alert fatigue | clinicians ignore alerts | alert-rate targets; hysteresis; band-specific actions |
 | Overfitting to the pilot cohort | poor transfer | external check; stability analysis |
-| Mission-phase change (new L, new dose rate) | wrong DTR | L and dose rate are explicit inputs, logged with each output |
+| Mission-phase change (new L, new dose rate) | wrong MDTR | L and dose rate are explicit inputs, logged with each output |
 
 ## 7. Governance
 
 - **Human in the loop.** The system produces decision support; a clinician decides. No automatic action.
-- **Logging and audit.** Every R and DTR is stored with its inputs, parameter version, and override reasons.
+- **Logging and audit.** Every R and MDTR is stored with its inputs, parameter version, and override reasons.
 - **Change control.** Any parameter change is versioned and re-tested against the stability and simulation suites before use.
 - **Privacy.** Treat all inputs as identifiable health data, especially in small crews. Collect the minimum features required.
 - **Regulatory and ethical review.** The regulatory status of automated health-risk scoring and of mental-health monitoring was not researched in this plan. Obtain qualified advice and institutional review (IRB or equivalent) before any use with people.

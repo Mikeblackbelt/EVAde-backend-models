@@ -18,7 +18,7 @@ Behavioral health here means mood, anxiety, stress, sleep, cognitive performance
 3. **Spaceflight and isolation change the physiology themselves.** HF-HRV falls in orbit and over a long Antarctic winter, with no mood outcome needed to explain it. Any model needs an in-mission personal baseline and a time-in-mission term. An Earth-derived population cutoff will misfire.
 4. **Sleep, activity, and cognition are the best-supported channels.** Sleep deficiency is the most replicated ISS finding, and a validated, sleep-loss-sensitive cognition battery exists.
 
-The recommended Blindsight output is a **personal-baseline trend with an uncertainty interval and a flag for human review**, not a diagnosis and not a crisis predictor.
+The recommended EVAde output is a **personal-baseline trend with an uncertainty interval and a flag for human review**, not a diagnosis and not a crisis predictor.
 
 ## 2. Evidence from spaceflight and analogs
 

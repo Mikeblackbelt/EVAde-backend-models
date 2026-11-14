@@ -4,9 +4,9 @@ Status labels: **VERIFIED** = bibliographic record and abstract (or primary docu
 
 ## 1. Summary
 
-Galactic cosmic rays (GCR) and solar energetic particle (SEP) events create two problems for Blindsight. Crew exposure raises long-term cancer, cardiovascular, and possibly central nervous system (CNS) risk. Separately, single-event effects (SEEs) in electronics can corrupt sensor data or latch up a device. Measurements show that dose rate varies several-fold with shielding location, vehicle orientation, orbit phase, and solar activity, which is the main argument for per-person or per-location sensing instead of one cabin number.
+Galactic cosmic rays (GCR) and solar energetic particle (SEP) events create two problems for EVAde. Crew exposure raises long-term cancer, cardiovascular, and possibly central nervous system (CNS) risk. Separately, single-event effects (SEEs) in electronics can corrupt sensor data or latch up a device. Measurements show that dose rate varies several-fold with shielding location, vehicle orientation, orbit phase, and solar activity, which is the main argument for per-person or per-location sensing instead of one cabin number.
 
-The recommended Blindsight claim is narrow: **estimate radiation context (orbit phase, SPE onset) and flag possible SEU-induced sensor faults.** Do not claim to infer individual dose-equivalent risk or CNS and behavioral effects from wearable signals. Human CNS evidence is limited, and quantitative CNS risk models are not available.
+The recommended EVAde claim is narrow: **estimate radiation context (orbit phase, SPE onset) and flag possible SEU-induced sensor faults.** Do not claim to infer individual dose-equivalent risk or CNS and behavioral effects from wearable signals. Human CNS evidence is limited, and quantitative CNS risk models are not available.
 
 ## 2. Measured radiation environments (anchor numbers)
 
