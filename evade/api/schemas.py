@@ -182,3 +182,22 @@ class Instrument(BaseModel):
         if len(self.answers) != n or any(a not in (0, 1, 2, 3) for a in self.answers):
             raise ValueError(f"{self.instrument} needs {n} answers, each 0-3")
         return self
+
+
+class DeviceBind(BaseModel):
+    user_id: str
+    device_id: str = Field(min_length=3, max_length=64)
+    kind: Literal["hr_strap", "ecg_patch", "eeg_headband", "ppg_wrist", "phone", "simulated"]
+    vendor: str | None = Field(None, max_length=40)
+    model: str | None = Field(None, max_length=40)
+    firmware: str | None = Field(None, max_length=40)
+
+
+class IngestBatch(BaseModel):
+    user_id: str
+    device_id: str = Field(min_length=3, max_length=64)
+    seq: int = Field(ge=0)
+    windows: list[Window] = Field(default_factory=list, max_length=20)
+    readings: list[Reading] = Field(default_factory=list, max_length=500)
+    battery_pct: float | None = Field(None, ge=0, le=100)
+    clock_offset_ms: float | None = None

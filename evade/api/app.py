@@ -57,6 +57,7 @@ class State:
         self.overrides: dict[str, set] = {}
         self.risk_history: dict[str, list] = {}
         self.inputs: dict[str, list] = {}
+        self.devices: dict[str, dict] = {}      # device_id -> {user_id, kind, ..., last_seq, last_seen}
         self.lock = threading.Lock()
         self.models = load_models()
 
@@ -457,3 +458,64 @@ def instrument(body: S.Instrument):
 def actions(user_id: str):
     user(user_id)
     return envelope(user_id, {"actions": alerts_for(list(STATE.latest.get(user_id, {}).values()))})
+
+
+@app.post("/v1/devices/bind", dependencies=[Depends(auth)])
+def bind_device(body: S.DeviceBind):
+    user(body.user_id)
+    with STATE.lock:
+        cur = STATE.devices.get(body.device_id)
+        if cur and cur["user_id"] != body.user_id:
+            raise err(409, "device_already_bound", "device is bound to another user; unbind it first", "device_id")
+        STATE.devices[body.device_id] = {"user_id": body.user_id, "kind": body.kind, "vendor": body.vendor,
+                                         "model": body.model, "firmware": body.firmware, "last_seq": -1,
+                                         "last_seen": None, "battery_pct": None, "gaps": 0}
+    return envelope(body.user_id, {"device_id": body.device_id, "bound": True})
+
+
+@app.delete("/v1/devices/{device_id}", dependencies=[Depends(auth)])
+def unbind_device(device_id: str, user_id: str):
+    user(user_id)
+    with STATE.lock:
+        cur = STATE.devices.get(device_id)
+        if not cur or cur["user_id"] != user_id:
+            raise err(404, "device_not_found", "no such device for this user", "device_id")
+        del STATE.devices[device_id]
+    return envelope(user_id, {"device_id": device_id, "bound": False})
+
+
+@app.get("/v1/devices/{device_id}", dependencies=[Depends(auth)])
+def device_status(device_id: str, user_id: str):
+    user(user_id)
+    cur = STATE.devices.get(device_id)
+    if not cur or cur["user_id"] != user_id:
+        raise err(404, "device_not_found", "no such device for this user", "device_id")
+    return envelope(user_id, {"device_id": device_id, **{k: v for k, v in cur.items() if k != "user_id"}})
+
+
+@app.post("/v1/ingest/batch", dependencies=[Depends(auth)])
+def ingest_batch(body: S.IngestBatch):
+    user(body.user_id)
+    with STATE.lock:
+        dev = STATE.devices.get(body.device_id)
+        if not dev or dev["user_id"] != body.user_id:
+            raise err(404, "device_not_found", "bind the device to this user first", "device_id")
+        if body.seq <= dev["last_seq"]:
+            return envelope(body.user_id, {"accepted": 0, "duplicates": 1, "next_seq_expected": dev["last_seq"] + 1})
+        gap = body.seq - dev["last_seq"] - 1 if dev["last_seq"] >= 0 else 0
+        dev["gaps"] += max(gap, 0)
+        dev["last_seq"], dev["last_seen"] = body.seq, datetime.now(timezone.utc).isoformat()
+        if body.battery_pct is not None:
+            dev["battery_pct"] = body.battery_pct
+    comps = []
+    for w in body.windows:
+        comps += window_comparisons(body.user_id, w)
+    for r in body.readings:
+        comps.append(STATE.baselines.compare(body.user_id, r.modality, r.metric, r.value, quality=r.quality, unit=r.unit))
+    remember(body.user_id, comps)
+    flagged = [c for c in comps if c["level"] != "green"]
+    return envelope(body.user_id, {"accepted": len(body.windows) + len(body.readings), "duplicates": 0,
+                                   "gap_before": max(gap, 0), "next_seq_expected": body.seq + 1,
+                                   "comparison_summary": {"n": len(comps), "n_flagged": len(flagged),
+                                                          "levels": sorted({c["level"] for c in comps})},
+                                   "alerts": alerts_for(comps)})

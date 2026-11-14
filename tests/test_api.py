@@ -119,3 +119,18 @@ def test_eeg_endpoint_runs_without_model():
     assert r.status_code == 200, r.text
     d = r.json()["data"]
     assert d["channels_mapped"] == 18 and "theta_beta" in d["features"] and "seizure" not in d
+
+
+def test_device_bind_ingest_dedupe_and_isolation():
+    a, b = new_user(), new_user()
+    assert C.post("/v1/devices/bind", json={"user_id": a, "device_id": "polar-123", "kind": "hr_strap"}, headers=H).status_code == 200
+    r = C.post("/v1/devices/bind", json={"user_id": b, "device_id": "polar-123", "kind": "hr_strap"}, headers=H)
+    assert r.status_code == 409 and r.json()["error"]["code"] == "device_already_bound"
+    rd = {"metric": "hr_bpm", "value": 61.0, "unit": "bpm", "t_utc": NOW, "modality": "ecg"}
+    d = C.post("/v1/ingest/batch", json={"user_id": a, "device_id": "polar-123", "seq": 0, "readings": [rd]}, headers=H).json()["data"]
+    assert d["accepted"] == 1 and d["next_seq_expected"] == 1
+    d = C.post("/v1/ingest/batch", json={"user_id": a, "device_id": "polar-123", "seq": 0, "readings": [rd]}, headers=H).json()["data"]
+    assert d["duplicates"] == 1 and d["accepted"] == 0
+    d = C.post("/v1/ingest/batch", json={"user_id": a, "device_id": "polar-123", "seq": 3, "readings": [rd]}, headers=H).json()["data"]
+    assert d["gap_before"] == 2
+    assert C.post("/v1/ingest/batch", json={"user_id": b, "device_id": "polar-123", "seq": 9, "readings": [rd]}, headers=H).status_code == 404
