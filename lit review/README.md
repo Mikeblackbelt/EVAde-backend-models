@@ -1,6 +1,6 @@
 # Literature Review
 
-Working notes on the six areas Blindsight depends on (radiation, vital signs, ECG, EEG, bone health, behavioral health), a cross-cutting integration and evaluation document, and a folder of data sources. No code yet. Each topic folder holds a summary, verified sources, and concrete implementation steps. `data-collection-sources/` lists where training and validation data can come from, with access terms.
+Working notes for **EVAde**, a space health monitoring platform, on the six areas the backend depends on (radiation, vital signs, ECG, EEG, bone health, behavioral health), a cross-cutting integration and evaluation document, model architectures, theory-only planning, and a folder of data sources. **No code yet.** Each topic folder holds a summary, labeled sources, and concrete implementation steps. `data-collection-sources/` lists where training and validation data can come from, with access terms. `planning/` holds the risk score, days to return, data acquisition (including the 2-day hackathon scope), per-user baseline comparison, and Bluetooth plans. The whole set is also in [lit-review.pdf](lit-review.pdf).
 
 | Folder | Topic |
 |---|---|

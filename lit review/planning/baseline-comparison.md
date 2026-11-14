@@ -133,7 +133,7 @@ Known conflicts to settle at integration:
 - The prototype's cardiac rule uses absolute heart rate limits (130 and 40 bpm) and irregularity; keep them as absolute backstops next to the personal baseline, not replaced by it.
 - The prototype's alert-on-escalation logic (alert only when the level rises, re-arm on green) should stay, and move into the per-user state.
 - The prototype works at 256 Hz with four frontal and temporal EEG channels; the planned pipeline resamples to 250 Hz and maps to a fixed 10-20 subset. The comparison uses features, so only the feature extraction needs the mapping.
-- Naming: the prototype says "Blingsight"; this repository says "Blindsight" and "EVAde". Pick one name for the demo.
+- Naming: the prototype says "Blingsight"; this repository used "Blindsight" earlier and now uses "EVAde". Use EVAde in the demo and the API.
 
 ## 8. Testing and evaluation
 

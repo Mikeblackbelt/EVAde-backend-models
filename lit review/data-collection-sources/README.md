@@ -1,6 +1,6 @@
 # Data Collection Sources
 
-Where training and validation data for Blindsight can come from, with access terms and known limits. Licenses change, so check each source's page before use. Nothing here has been downloaded or tested.
+Where training and validation data for EVAde can come from, with access terms and known limits. Licenses change, so check each source's page before use. Nothing here has been downloaded or tested.
 
 | File | Covers |
 |---|---|

@@ -82,7 +82,7 @@ See [ecg-applications](../ecg-applications/README.md) for arrhythmia detection, 
 1. Fix the protocol: a daily 5-minute resting or sleep-period window, same posture and time (Quigley 2024).
 2. Use chest-strap or patch ECG as the primary R-R source; headline index RMSSD plus mean heart rate.
 3. Label PPG-derived values as pulse rate variability, gate by quality and motion, and use only at rest or sleep.
-4. Validate any ultra-short window against 5-minute values on Blindsight data (bias and limits of agreement); use at least 120 s outside strict rest.
+4. Validate any ultra-short window against 5-minute values on EVAde data (bias and limits of agreement); use at least 120 s outside strict rest.
 5. Build personal baselines from the first days and add a time-in-mission term.
 6. Log sleep, medication class and start date, caffeine, activity, age, sex, posture, breathing or ECG-derived respiration, and habitat CO2 where available.
 7. Evaluate subject-wise and time-forward, with a logistic-regression baseline and a leakage checklist.

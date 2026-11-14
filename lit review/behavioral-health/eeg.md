@@ -4,7 +4,7 @@ Status labels: **VERIFIED** = bibliographic record and abstract checked; **PARTI
 
 ## 1. Summary
 
-EEG is a legitimate tool for **sleep architecture** and for **tracking drowsiness and workload**, and an unreliable one for **diagnosing mood or anxiety disorders**. The largest meta-analyses find the most-studied depression marker (frontal alpha asymmetry) to be negligible or small. Connectivity findings are inconsistent in direction. Deep-learning papers report 76-100% accuracy for depression detection, but those numbers cluster in small samples with subject-dependent validation. For Blindsight, EEG should be an **optional, pre-registered** channel, used first for sleep, with mood claims withheld until a controlled pilot supports them.
+EEG is a legitimate tool for **sleep architecture** and for **tracking drowsiness and workload**, and an unreliable one for **diagnosing mood or anxiety disorders**. The largest meta-analyses find the most-studied depression marker (frontal alpha asymmetry) to be negligible or small. Connectivity findings are inconsistent in direction. Deep-learning papers report 76-100% accuracy for depression detection, but those numbers cluster in small samples with subject-dependent validation. For EVAde, EEG should be an **optional, pre-registered** channel, used first for sleep, with mood claims withheld until a controlled pilot supports them.
 
 ## 2. Resting-state EEG markers of depression and anxiety
 
