@@ -255,3 +255,16 @@ def test_bidmc_smoke(tmp_path):
     from evade.preprocessing.datasets import run_bidmc
     df = run_bidmc(root, tmp_path, limit=1)
     assert set(df.modality) == {"ppg", "ecg", "resp"} and len(df) > 20
+
+
+def test_siena_list_with_inconsistent_times_parses_all_blocks():
+    txt = """Seizure n 3
+File name: PN00-3.edf
+Registration start time: 18.15.44
+Registration end time: 18.57.13
+Seizure start time: 18.28.29
+Seizure end time: 19.29.29
+"""
+    reg, sz = eeg.parse_siena_seizure_list(txt)
+    r, s, e = sz[0]
+    assert e - r > 3600   # longer than the 42 min registration: callers must treat this as suspect

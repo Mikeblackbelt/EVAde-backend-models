@@ -168,8 +168,16 @@ def run_siena(root: Path, out: Path, limit: int | None = None) -> pd.DataFrame:
             # per-file seizure blocks: split the list text by file name when present
             block = text.split(edf.name)[1].split("File name")[0] if edf.name in text else ""
             _, sz = parse_siena_seizure_list(block)
-            segs = [(max(s - reg, 0.0), e - reg) for reg, s, e in sz]
-            df["label"] = label_windows_seizure(df.window_start_s.to_numpy(), config.EEG_WIN_S, segs)
+            segs = [((s - reg) % 86400.0, (e - reg) % 86400.0) for reg, s, e in sz]   # modulo handles midnight rollover
+            rec_dur = x_p.shape[-1] / fs_p
+            # an annotated seizure that ends after the recording does is an annotation error (seen in PN00-3,
+            # where the end time is an hour past the registration end): do not label it ictal; exclude from onset on
+            bad = [(s0, e0) for s0, e0 in segs if e0 > rec_dur + 5.0 or e0 < s0]
+            good = [sg for sg in segs if sg not in bad]
+            df["label"] = label_windows_seizure(df.window_start_s.to_numpy(), config.EEG_WIN_S, good)
+            df["annotation_suspect"] = bool(bad)
+            for s0, _ in bad:
+                df.loc[(df.window_start_s >= s0 - config.SZ_PRE_BUFFER_S) & (df.label != 1), "label"] = -1
             df["n_channels_present"] = sum(1 for p in present if p)
             _save(out, "siena", edf.stem, wins, {"label": df.label.to_numpy()})
             rows.append(df)
