@@ -155,3 +155,37 @@ def test_missing_content_length_rejected():
         yield body
     r = C.post("/v1/users", content=gen(), headers={**H, "Content-Type": "application/json"})
     assert r.status_code == 411
+
+
+def _eeg(secs, seed):
+    fs = 250.0
+    rng = np.random.default_rng(seed)
+    names = ["FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP1-F3", "F3-C3", "C3-P3", "P3-O1", "FP2-F4", "F4-C4", "C4-P4",
+             "P4-O2", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FZ-CZ", "CZ-PZ"]
+    return {"modality": "eeg", "t0_utc": NOW, "fs_hz": fs, "unit": "uv", "channels": names,
+            "samples": (20 * rng.standard_normal((18, int(secs * fs)))).round(3).tolist()}
+
+
+def test_eeg_seizure_model_needs_user_baseline_then_runs():
+    from evade.api.app import STATE
+    from evade.preprocessing import config
+    from evade.training.features import EEG_BANDS, spectral_features
+    from sklearn.linear_model import LogisticRegression
+    rng = np.random.default_rng(0)
+    _, names = spectral_features(rng.standard_normal((2, 18, 1000)), 250.0, EEG_BANDS, config.BIPOLAR_NAMES)
+    X = rng.standard_normal((200, len(names)))
+    y = (X[:, 0] > 1).astype(int)
+    STATE.models["seizure"] = {"model": LogisticRegression().fit(X, y), "features": names, "model_id": "EVA-test",
+                               "status": "draft",
+                               "metrics": {"leave_one_subject_out_chbmit": {"hgb": {"threshold_at_1pct_fpr": 0.9}}}}
+    try:
+        uid = new_user()
+        d = C.post("/v1/predict/eeg", json={"user_id": uid, "window": _eeg(10, 1)}, headers=H).json()["data"]
+        assert d["seizure"]["needs_baseline"]
+        for i in range(8):               # 1 MB request cap: about 30 s of 18-channel EEG per call
+            r = C.post("/v1/baseline/eeg", json={"user_id": uid, "windows": [_eeg(10, 10 + i)]}, headers=H)
+            assert r.status_code == 200
+        d = C.post("/v1/predict/eeg", json={"user_id": uid, "window": _eeg(10, 4)}, headers=H).json()
+        assert d["data"]["seizure"]["flag"] in ("none", "suspect_seizure") and d["model_ids"] == ["EVA-test"]
+    finally:
+        STATE.models.pop("seizure", None)

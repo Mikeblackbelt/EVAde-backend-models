@@ -59,6 +59,7 @@ class State:
         self.risk_history: dict[str, list] = {}
         self.inputs: dict[str, list] = {}
         self.devices: dict[str, dict] = {}      # device_id -> {user_id, kind, ..., last_seq, last_seen}
+        self.eeg_feats: dict[str, dict] = {}    # user_id -> {rows: [...], med, mad}: per-user EEG feature baseline
         self.lock = threading.Lock()
         self.models = load_models()
 
@@ -216,6 +217,23 @@ def window_comparisons(user_id: str, w: S.Window) -> list[dict]:
     return out
 
 
+EEG_FEAT_MIN = 30     # 4 s windows (about 1 minute of EEG) before the seizure model can run for a user
+
+
+def add_eeg_feature_baseline(user_id: str, feats: np.ndarray) -> None:
+    with STATE.lock:
+        if user_id not in STATE.users:
+            return
+        st = STATE.eeg_feats.setdefault(user_id, {"rows": [], "med": None, "mad": None})
+        if st["med"] is not None:
+            return                              # locked; reset by /v1/baseline/eeg/reset
+        st["rows"].extend(np.asarray(feats, np.float64).tolist())
+        if len(st["rows"]) >= EEG_FEAT_MIN:
+            X = np.asarray(st["rows"])
+            med = np.median(X, axis=0)
+            st["med"], st["mad"] = med, np.maximum(1.4826 * np.median(np.abs(X - med), axis=0), 1e-6)
+
+
 # ---------------- endpoints ----------------
 @app.get("/v1/health")
 def health():
@@ -256,7 +274,7 @@ def delete_user(user_id: str):
         if user_id not in STATE.users:
             raise err(404, "user_not_found", "unknown user_id", "user_id")
         STATE.baselines.delete_user(user_id)     # tombstone first, so concurrent requests cannot recreate data
-        for d in (STATE.users, STATE.latest, STATE.radiation, STATE.overrides, STATE.risk_history, STATE.inputs):
+        for d in (STATE.users, STATE.latest, STATE.radiation, STATE.overrides, STATE.risk_history, STATE.inputs, STATE.eeg_feats):
             d.pop(user_id, None)
         for dev in [k for k, v in STATE.devices.items() if v["user_id"] == user_id]:
             del STATE.devices[dev]
@@ -274,12 +292,14 @@ def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
         if w.modality == "ecg":
             m, q = ecg_window_metrics(w)
         elif w.modality == "eeg":
-            _, _, m, q, _ = eeg_window_metrics(w)
+            feats, _, m, q, _ = eeg_window_metrics(w)
         else:
             raise err(422, "validation_error", "ppg windows are not supported in the beta", "modality")
         if q < config.QUALITY_MIN:
             excluded["low_quality"] += 1
             continue
+        if w.modality == "eeg":
+            add_eeg_feature_baseline(body.user_id, feats)
         for k, v in m.items():
             if v is not None and np.isfinite(v):
                 STATE.baselines.add(body.user_id, modality, k, float(v), quality=q, mode=body.mode, phase=body.phase)
@@ -299,6 +319,9 @@ def baseline_confirm(modality: S.Modality, body: S.UserRef):
 @app.post("/v1/baseline/{modality}/reset", dependencies=[Depends(auth)])
 def baseline_reset(modality: S.Modality, body: S.BaselineReset):
     user(body.user_id)
+    if modality == "eeg":
+        with STATE.lock:
+            STATE.eeg_feats.pop(body.user_id, None)
     return envelope(body.user_id, {"archived": STATE.baselines.reset(body.user_id, modality, body.phase), "reason": body.reason})
 
 
@@ -369,14 +392,21 @@ def predict_eeg(body: S.EegRequest):
             "features": {k: round(v, 4) for k, v in m.items()}, "comparison": comps}
     ids, warn = [], []
     mdl = STATE.models.get("seizure")
-    if mdl and q >= 0.5:
-        p = mdl["model"].predict_proba(feats[:, [names.index(n) for n in mdl["features"]]])[:, 1]
+    stats = STATE.eeg_feats.get(body.user_id, {})
+    if mdl and q >= 0.5 and stats.get("med") is not None:
+        X = feats[:, [names.index(n) for n in mdl["features"]]]
+        X = np.clip((X - stats["med"]) / stats["mad"], -20, 20)       # same per-person normalization as training
+        p = mdl["model"].predict_proba(X.astype(np.float32))[:, 1]
+        p = np.convolve(p, np.ones(3) / 3, mode="same") if len(p) >= 3 else p   # 3-window smoothing as in training
         thr = mdl["metrics"]["leave_one_subject_out_chbmit"]["hgb"]["threshold_at_1pct_fpr"]
         pmax = float(p.max())
-        data["seizure"] = {"flag": "suspect_seizure" if pmax >= thr else "none", "probability": round(pmax, 3),
+        data["seizure"] = {"flag": "suspect_seizure" if pmax > thr else "none", "probability": round(pmax, 3),
                            "threshold": round(thr, 3), "override_candidate": pmax >= 0.9,
                            "note": "beta draft model; never raises override O4 on its own, a human reviews"}
         ids.append(mdl["model_id"]); warn.append("draft model output")
+    elif mdl and q >= 0.5:
+        data["seizure"] = {"flag": None, "needs_baseline": True,
+                           "note": f"submit at least {EEG_FEAT_MIN} 4 s windows of EEG to /v1/baseline/eeg first"}
     elif mdl:
         data["seizure"] = {"flag": None, "low_quality": True}
     return envelope(body.user_id, data, ids, warn)

@@ -16,17 +16,21 @@ def safe_ap(y, p) -> float:
 
 
 def threshold_at_fpr(y, p, fpr: float = 0.01) -> float:
-    """Score threshold giving at most `fpr` false-positive rate on (y, p)."""
-    neg = np.sort(np.asarray(p)[np.asarray(y) == 0])
+    """Threshold t such that the fraction of negatives with score > t is at most `fpr` (flag = score > t).
+
+    Uses a strict inequality so that ties (for example many scores at exactly 1.0) cannot push the
+    false-positive rate above the target; if ties make the target unreachable, nothing above t is flagged.
+    """
+    neg = np.asarray(p)[np.asarray(y) == 0]
     if len(neg) == 0:
         return 0.5
-    return float(neg[min(len(neg) - 1, int(np.ceil((1 - fpr) * len(neg))))])
+    return float(np.quantile(neg, 1 - fpr, method="higher"))
 
 
 def sens_at(y, p, thr: float) -> tuple[float, float]:
-    """Return (sensitivity, false-positive rate) at a fixed threshold."""
+    """Return (sensitivity, false-positive rate) for flag = score > thr."""
     y = np.asarray(y)
-    pred = np.asarray(p) >= thr
+    pred = np.asarray(p) > thr
     sens = float(pred[y == 1].mean()) if (y == 1).any() else float("nan")
     fpr = float(pred[y == 0].mean()) if (y == 0).any() else float("nan")
     return sens, fpr

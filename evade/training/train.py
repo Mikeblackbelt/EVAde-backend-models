@@ -57,6 +57,31 @@ def _write(out: Path, task: str, metrics: dict, model, cols: list[str]) -> None:
 
 
 # ---------------- seizure ----------------
+SMOOTH_W = 3
+
+
+def normalize_per_person(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Robust z-score of every feature within each participant."""
+    df = df.copy()
+    X = np.array(df[cols].to_numpy(np.float64), copy=True)     # pandas 3 returns read-only views
+    for pid, idx in df.groupby("participant_id").indices.items():
+        med = np.median(X[idx], axis=0)
+        mad = 1.4826 * np.median(np.abs(X[idx] - med), axis=0)
+        X[idx] = (X[idx] - med) / np.maximum(mad, 1e-6)
+    df[cols] = np.clip(X, -20, 20).astype(np.float32)
+    return df
+
+
+def smooth_by_record(p: np.ndarray, rec: np.ndarray, start: np.ndarray, w: int = SMOOTH_W) -> np.ndarray:
+    """Centered moving average of window scores in time order within each recording (NaNs kept)."""
+    out = np.array(p, dtype=float, copy=True)
+    s = pd.DataFrame({"p": p, "rec": rec, "t": start}).reset_index()
+    for _, g in s.groupby("rec"):
+        g = g.sort_values("t")
+        v = g.p.rolling(w, center=True, min_periods=1).mean().to_numpy()
+        ok = ~np.isnan(g.p.to_numpy())
+        out[g["index"].to_numpy()[ok]] = v[ok]
+    return out
 def _safe(fn, *args):
     """Run a per-file feature job; return None (and say why) if the file is unreadable, e.g. a partial download."""
     try:
@@ -81,10 +106,15 @@ def run_seizure(a) -> dict:
         parts = Parallel(n_jobs=a.threads)(delayed(_safe)(data.siena_file_features, e, t, sub) for e, t, sub in jobs)
         pd.concat([x for x in parts if x is not None], ignore_index=True).to_parquet(cache_s)
     chb = pd.read_parquet(cache_c)
-    chb = chb[chb.label >= 0].reset_index(drop=True)
     cols = feat_cols(chb)
+    # per-person robust normalization (unsupervised, all of that person's windows): the serving side does the same
+    # with the user's own EEG baseline, so this matches the personal-baseline design
+    chb = normalize_per_person(chb, cols)
+    chb = chb[chb.label >= 0].reset_index(drop=True)
     X, y, g = chb[cols].to_numpy(np.float32), chb.label.to_numpy(), chb.participant_id.to_numpy()
     res = {"task": "seizure", "model": "HistGradientBoosting on band-power and line-length features",
+           "feature_norm": "per_person_robust (median, 1.4826 x MAD over all of the person's windows)",
+           "smoothing": f"centered moving average of {SMOOTH_W} windows within each recording",
            "n_windows": int(len(chb)), "n_ictal": int(y.sum()), "subjects": sorted(set(g)),
            "window_s": 4.0, "step_s": 2.0, "feature_time_s": round(time.time() - t0, 1)}
     subs = [s for s in sorted(set(g)) if y[g == s].sum() > 0 and (y[g == s] == 0).sum() > 0]
@@ -97,6 +127,8 @@ def run_seizure(a) -> dict:
                 continue
             oof[te] = fit(mk(), X[tr], y[tr]).predict_proba(X[te])[:, 1]
         m = ~np.isnan(oof)
+        raw_auroc = M.safe_auroc(y[m], oof[m])
+        oof = smooth_by_record(oof, chb.record_id.to_numpy(), chb.window_start_s.to_numpy())
         thr = M.threshold_at_fpr(y[m], oof[m], 0.01)
         per = {}
         for s in subs:
@@ -108,6 +140,7 @@ def run_seizure(a) -> dict:
                       "sensitivity_at_thr": sens, "fpr_at_thr": fpr, "n_ictal": int(y[te].sum())}
         out_cv[name] = {
             "pooled_auroc": M.safe_auroc(y[m], oof[m]), "pooled_ap": M.safe_ap(y[m], oof[m]),
+            "pooled_auroc_unsmoothed": raw_auroc,
             "threshold_at_1pct_fpr": thr,
             "per_subject": per,
             "subject_auroc_ci": M.subject_bootstrap_ci([v["auroc"] for v in per.values()]),
@@ -116,12 +149,14 @@ def run_seizure(a) -> dict:
     res["leave_one_subject_out_chbmit"] = out_cv
     final = fit(make_hgb(), X, y)
     if cache_s.exists():
-        sie = pd.read_parquet(cache_s)
+        sie = normalize_per_person(pd.read_parquet(cache_s), cols)
         sie = sie[sie.label >= 0].reset_index(drop=True)
         ys, ps = sie.label.to_numpy(), final.predict_proba(sie[cols].to_numpy(np.float32))[:, 1]
+        ps = smooth_by_record(ps, sie.record_id.to_numpy(), sie.window_start_s.to_numpy())
         thr = out_cv["hgb"]["threshold_at_1pct_fpr"]
         sens, fpr = M.sens_at(ys, ps, thr)
-        lr = fit(make_lr(), X, y).predict_proba(sie[cols].to_numpy(np.float32))[:, 1]
+        lr = smooth_by_record(fit(make_lr(), X, y).predict_proba(sie[cols].to_numpy(np.float32))[:, 1],
+                              sie.record_id.to_numpy(), sie.window_start_s.to_numpy())
         res["external_siena"] = {
             "note": "trained on CHB-MIT (pediatric, bipolar montage), tested on Siena (adults, monopolar converted to bipolar)",
             "n_windows": int(len(sie)), "n_ictal": int(ys.sum()), "subjects": sorted(set(sie.participant_id)),

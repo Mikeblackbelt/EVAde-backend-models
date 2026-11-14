@@ -6,7 +6,9 @@ pytest.importorskip("sklearn")
 
 from evade.training import metrics as M
 from evade.training.features import EEG_BANDS, ecg_features, spectral_features
-from evade.training.train import fit, make_hgb, make_lr
+import pandas as pd
+
+from evade.training.train import fit, make_hgb, make_lr, normalize_per_person, smooth_by_record
 
 
 def _sine(freq, fs=250.0, n_win=6, ch=3, secs=4.0, seed=0):
@@ -61,3 +63,19 @@ def test_ecg_features_shape():
     w = rng.standard_normal((4, 12, 1000))
     f, names = ecg_features(w, 100.0, [f"L{i}" for i in range(12)])
     assert f.shape == (4, len(names))
+
+
+def test_normalize_per_person_centers_each_person():
+    df = pd.DataFrame({"participant_id": ["a"] * 5 + ["b"] * 5, "f1": [1, 2, 3, 4, 5, 101, 102, 103, 104, 105.0],
+                       "label": 0})
+    out = normalize_per_person(df, ["f1"])
+    assert out.groupby("participant_id").f1.median().abs().max() < 1e-6
+    assert out.loc[0, "f1"] == out.loc[5, "f1"]
+
+
+def test_smooth_by_record_stays_within_record():
+    p = np.array([0.0, 1.0, 0.0, 1.0, 1.0, 1.0])
+    rec = np.array(["r1", "r1", "r1", "r2", "r2", "r2"])
+    t = np.array([0, 2, 4, 0, 2, 4.0])
+    out = smooth_by_record(p, rec, t, w=3)
+    assert out[1] == pytest.approx(1 / 3) and np.allclose(out[3:], 1.0)

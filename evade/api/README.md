@@ -46,6 +46,10 @@ curl -s -X POST localhost:8000/v1/predict/risk -H "Authorization: Bearer $EVADE_
      -d '{"user_id": "<id>", "domain_inputs": {"behavioral": {"s": 0.65}, "radiation": {"s": 0.4}}, "logistics_floor_days": 0.5}'
 ```
 
+## Sizes and the seizure model
+
+Requests are capped at 1 MB, which is about 30 s of 18-channel EEG at 250 Hz as JSON, so send EEG baselines in several calls. The beta seizure model (EVA-2) uses per-person feature normalization, so it runs for a user only after at least 30 four-second EEG windows (about 1 minute) have been sent to `/v1/baseline/eeg`; before that `/v1/predict/eeg` returns `needs_baseline`.
+
 ## Behavior rules (from the schema)
 
 - Low-quality windows return null values, `confidence: low_quality`, and no flag.
