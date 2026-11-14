@@ -4,7 +4,7 @@ DTR is the recommended latest time to return to Earth or to definitive care. It 
 
 ## 1. Base curve from risk
 
-**DTR_R = 150 x (1 - R)^1.5 days**
+**DTR_R = 150 x (1 - R_dtr)^1.5 days**, where R_dtr is the aggregated risk before the abnormal-component flag floor (hard-rule overrides still floor it at 0.80; see [risk-score.md](risk-score.md) section 3). The table below is in terms of R_dtr.
 
 | R | DTR_R (days) | Display |
 |---|---|---|
@@ -81,7 +81,7 @@ where R_low and R_high are the 10th and 90th percentiles from the Monte Carlo dr
 | Case | Behavior |
 |---|---|
 | Data quality Q below 0.6 | mark DTR "provisional"; no value above 100 is shown as certain |
-| Override active, R floored to 0.80 | DTR_R = 13.4 days, then the override rule and T_acute apply |
+| Override active, R_dtr floored to 0.80 | DTR_R = 13.4 days, then the override rule and T_acute apply |
 | Two severe domains (R above 0.9) | DTR_R below 5 days |
 | R falls steadily | DTR rises through the rate limiter |
 | Missing logistics input L | refuse to display DTR; show R only |

@@ -5,7 +5,7 @@
 1. Raw streams produce **features** (per-domain, below), each with a quality value in [0, 1].
 2. Each feature maps to a **component score** in [0, 1] through an anchor table (linear interpolation between anchors; below the first anchor = 0; above the last = the last value).
 3. Components combine into a **domain score** s_d in [0, 1].
-4. Domain scores combine into a **stress index X** in [0, 1], then into **R** by a logistic.
+4. Domain scores combine into per-domain risks p_d and then into **R** by a noisy-OR in log space (section 3), with an abnormal-component flag that floors displayed R at 0.60.
 5. **Hard-rule overrides** may raise R to a floor of 0.80 and escalate to a human.
 6. **Quality and uncertainty** are attached; a band and a recommended action follow.
 
@@ -76,15 +76,27 @@ Domain score: s_bone = max(K1, K2) of the available measurements. When no measur
 
 Rates for reference: DXA areal losses of 0.4-1.8 %/month and finite element hip strength losses of 2.0-2.6 %/month (bone research notes; verify). At the DXA prior, 100 days is about -3.3%, which scores about 0.28.
 
-## 3. Aggregation
+## 3. Aggregation (noisy-OR, summed in log space)
 
-- Weights: w_card 0.25, w_beh 0.25, w_neu 0.15, w_rad 0.20, w_bone 0.15 (sum 1.00).
-- Weighted mean: S = sum of w_d x s_d.
-- Worst domain: M = max of s_d.
-- Stress index: **X = 0.6 x S + 0.4 x M**.
-- Risk: **R = 1 / (1 + exp(-8 x (X - 0.45)))**.
+Version 2 replaces the earlier weighted-mean, worst-domain, and logistic blend. Any single abnormal domain now raises R, and independent abnormal domains compound.
 
-Properties: X = 0 gives R about 0.027; X = 1 gives R about 0.988; X = 0.45 gives R = 0.5. R is strictly inside (0, 1) for any finite X. Because X is in [0, 1], R stays between about 0.027 and 0.988.
+1. **Per-domain risk.** p_d = c_d x 0.75 x max(0, (s_d - 0.10) / 0.90).
+   - The 0.10 **dead zone** stops small deviations from piling up.
+   - The 0.75 **cap** means one domain alone cannot reach "critical".
+   - c_d is the domain **influence factor** (the former weight divided by 0.25): cardiac 1.0, behavioral 1.0, radiation 0.8, neuro 0.6, bone 0.6. It scales p_d and so keeps p_d at or below 0.75.
+2. **Log-space sum.** L = sum over domains of -ln(1 - p_d).
+3. **Noisy-OR risk.** R_raw = 1 - exp(-L), then R_agg = 0.005 + 0.99 x R_raw. The affine map keeps R strictly inside (0, 1): all-normal inputs give 0.005, and the maximum possible L gives about 0.995.
+4. **Abnormal-component flag.** If any domain has s_d at or above 0.30, set `flag = true` and display R = max(R_agg, 0.60). That is the bottom of the "high" band. Three conditions apply:
+   - Only domains with Q_d at least 0.5 can trip the flag. A domain raised to the 0.30 missing-data floor is marked "low confidence" and does **not** trip the flag.
+   - **Shadow-mode inputs** (EEG affective markers, wrist SpO2 until validated) are excluded from the flag test: the test uses s_d recomputed without them. They still contribute to p_d through the normal path, capped as before.
+   - The flag floor applies to the **displayed R and band**, not to DTR (see below).
+5. **Hard-rule overrides** (section 4) floor both displayed R and R used for DTR at 0.80.
+
+Two values leave this stage: **R_disp** = max(R_agg, 0.60 if flag, 0.80 if override), used for band, action, and display; and **R_dtr** = max(R_agg, 0.80 if override), used by [days-to-return.md](days-to-return.md). The decoupling avoids capping DTR near 38 days whenever a single component is abnormal (R = 0.60 would give 38 days).
+
+Properties: R_agg is monotonic in every s_d and strictly between 0.005 and about 0.995. Two domains at s = 0.8 with c = 1 give p = 0.583 each, L = 1.75, R_agg = 0.82 ("critical"); one domain at s = 0.5 with c = 1 gives p = 0.333, R_agg = 0.335, displayed 0.60 through the flag.
+
+**False-alarm consequence.** "Any one component" multiplies alert rates across five domains. If each domain's flag fires independently at rate a per evaluation, the overall rate is about 5a. To hold 1 high-or-above alert per person-month overall, the per-domain budget is about 0.2 per person-month, and the per-window specificity needed is about 99% or higher. Calibration therefore sets a per-domain false-alarm target (see [calibration-and-validation.md](calibration-and-validation.md)), not only an overall one.
 
 ## 4. Hard-rule overrides (floor R at 0.80 and escalate to a human)
 
@@ -96,13 +108,13 @@ Properties: X = 0 gives R about 0.027; X = 1 gives R about 0.988; X = 0.45 gives
 | O4 | seizure event with detector confidence at least 0.9 | immediate clinician review |
 | O5 | solar particle event dose at least 250 mSv, or projected to reach it within 24 h | immediate crew and ground alert |
 
-An override raises R to max(R, 0.80). It does not change the domain scores, so the display shows both the computed R and the override reason.
+An override raises R to max(R, 0.80) for both display and DTR. It does not change the domain scores, so the display shows both the computed R_agg and the override reason.
 
 ## 5. Data quality and confidence
 
 - **Domain quality** Q_d = fraction of expected valid windows in the evaluation period (0 to 1).
-- If Q_d < 0.5: set s_d = max(s_d, 0.30) and mark the domain "low confidence".
-- **Overall quality** Q = sum of w_d x Q_d. If Q < 0.6, label R "provisional".
+- If Q_d < 0.5: set s_d = max(s_d, 0.30) and mark the domain "low confidence". This floor does not trip the abnormal-component flag (section 3).
+- **Overall quality** Q = sum of v_d x Q_d, with v_d the former weights (cardiac 0.25, behavioral 0.25, radiation 0.20, neuro 0.15, bone 0.15), kept only for this quality score. If Q < 0.6, label R "provisional".
 - **Uncertainty:** run 1,000 Monte Carlo draws that perturb feature values by their sensor uncertainty and perturb anchors by 10%; report the 10th-90th percentile interval of R.
 
 ## 6. Update cadence and stability

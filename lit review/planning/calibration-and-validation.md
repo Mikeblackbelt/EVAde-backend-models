@@ -13,13 +13,13 @@ R is trained to match an adjudicated label: **"a clinician panel would recommend
 
 | Phase | What | Output |
 |---|---|---|
-| 0. Elicitation | structured expert rounds (Delphi, at least 8 experts across flight medicine, behavioral health, cardiology, neurology, radiation, bone; 2 rounds) to set weights, anchors, band edges, and override triggers | initial parameter set; Kendall's W of at least 0.6 on weight ranking |
+| 0. Elicitation | structured expert rounds (Delphi, at least 8 experts across flight medicine, behavioral health, cardiology, neurology, radiation, bone; 2 rounds) to set influence factors c_d, anchors, dead zone and cap, flag threshold, band edges, and override triggers | initial parameter set; Kendall's W of at least 0.6 on weight ranking |
 | 1. Simulation | synthetic cohort of 2,000 crew-missions with generated domain trajectories (healthy, slow decline, acute events, sensor failure) | check band distribution and alert rates; find unreachable states |
 | 2. Terrestrial pilot | at least 30 participants for at least 8 weeks in an analog or lab-confinement setting, with reference sensors and weekly questionnaires | calibration data and labels |
-| 3. Refit | constrained logistic regression (weights non-negative, summing to 1, L2 penalty) with subject-wise cross-validation | compare against the fixed expert weights |
+| 3. Refit | fit c_d (non-negative, at most 1), dead zone, and flag threshold by maximizing held-out likelihood of the 14-day label, with L2 penalty and subject-wise cross-validation; set a per-domain false-alarm target of about 0.2 high-or-above alerts per person-month so the five domains together meet the overall 1 per person-month | compare against the fixed expert values |
 | 4. External check | a second site or cohort that was not used in any fitting step | generalization result, including failures |
 
-Adoption rule for refit weights: use them only if held-out log-loss improves by at least 5% over the expert weights under subject-wise cross-validation; otherwise keep the expert weights.
+Adoption rule for refit parameters: use them only if held-out log-loss improves by at least 5% over the expert values under subject-wise cross-validation; otherwise keep the expert values.
 
 ## 3. Targets (design goals)
 
@@ -30,7 +30,7 @@ Adoption rule for refit weights: use them only if held-out log-loss improves by 
 | Skill | Brier skill score of at least 0.20 against a prevalence-only baseline |
 | False alerts, healthy cohort | at most 1 per person-month at "high" or above; at most 0.1 per person-month at "critical" |
 | Missed events | sensitivity of at least 0.90 for override-class events at their trigger thresholds |
-| Stability to parameter changes | weights varied by plus or minus 50% each and anchors by plus or minus 20%: Spearman correlation of R at least 0.9 and no more than 10% of case windows change band |
+| Stability to parameter changes | influence factors varied by plus or minus 50% each and anchors by plus or minus 20%: Spearman correlation of R at least 0.9 and no more than 10% of case windows change band |
 | Reliability | R changes by no more than 0.05 on re-computation with identical inputs and different random seeds |
 
 ## 4. DTR validation

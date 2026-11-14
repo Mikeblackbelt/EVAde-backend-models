@@ -17,7 +17,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 
 | File | Contents |
 |---|---|
-| [risk-score.md](risk-score.md) | Five domains, anchor tables, aggregation formula, overrides, data-quality handling, bands, actions |
+| [risk-score.md](risk-score.md) | Five domains, anchor tables, noisy-OR aggregation (version 2), flag, overrides, data-quality handling, bands, actions |
 | [days-to-return.md](days-to-return.md) | The DTR formula, trend adjustment, hard-limit times, logistics floor, intervals, display rules |
 | [worked-examples.md](worked-examples.md) | Three scenarios computed by hand, plus single-domain sensitivity |
 | [implementation-pipeline.md](implementation-pipeline.md) | Three-stage build plan: data ingestion and preprocessing, model training, FastAPI endpoints (`/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`), CORS, Pydantic, latency budget, build order |
@@ -27,7 +27,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 
 1. **Personal baselines first.** Most inputs are deviations from the person's own baseline, not population norms. Individual variation in confinement is large (Mars-500 crew responses ranged from none to persistent insomnia), so a fixed population threshold is the wrong model.
 2. **One feature, one domain.** No raw feature feeds two domains, so nothing is double counted. HRV feeds the behavioral stress component only. The cardiac domain uses heart rate, rhythm, SpO2, and respiration.
-3. **Single failures do not hide, and do not alone hit critical.** The aggregation blends a weighted average with the worst domain. A single fully failed domain lands in the "high" band; reaching "critical" needs two severe domains or a hard-rule override.
+3. **Single failures do not hide, and do not alone hit critical.** The aggregation is a noisy-OR in log space with a 0.75 cap per domain. A single abnormal domain (s at or above 0.30) puts displayed R at 0.60 or more ("high"); reaching "critical" needs two severe domains or a hard-rule override.
 4. **Missing data is not good news.** A domain with poor data is scored at least 0.30 and flagged low-confidence.
 5. **Weak evidence gets a cap.** EEG affective markers are near zero effect in large samples, so they run in shadow mode. Wrist SpO2 carries known skin-tone bias, so its uncertainty is widened. Portable bone proxies are unvalidated, so bone is capped unless measured.
 6. **Humans decide.** R and DTR are decision support. Nothing triggers action autonomously. Hard-rule overrides escalate to a clinician; they do not take clinical action.
@@ -37,9 +37,11 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 | Parameter | Value | Basis |
 |---|---|---|
 | Risk label horizon | 14 days | design assumption |
-| Domain weights | cardiac 0.25, behavioral 0.25, neuro 0.15, radiation 0.20, bone 0.15 | design assumption, to be elicited |
-| Blend of mean and max | 0.6 mean + 0.4 max | design assumption |
-| Logistic midpoint, slope | x0 = 0.45, k = 8 | design assumption |
+| Domain influence factors c_d | cardiac 1.0, behavioral 1.0, radiation 0.8, neuro 0.6, bone 0.6 | design assumption, to be elicited (former weights divided by 0.25) |
+| Dead zone, per-domain cap | 0.10, 0.75 | design assumption |
+| Noisy-OR map | R = 0.005 + 0.99 x (1 - exp(-L)) | design assumption (keeps R inside (0, 1)) |
+| Abnormal-component flag | domain s at or above 0.30; floors displayed R at 0.60; not applied to DTR; excludes low-data floors and shadow-mode inputs | design assumption |
+| Per-domain false-alarm budget | about 0.2 high-or-above alerts per person-month | design assumption (overall target of 1 divided across 5 domains) |
 | Risk band edges | 0.2, 0.4, 0.6, 0.8 | design assumption |
 | PHQ-9 anchors | 5, 10, 15, 20 | literature (Kroenke 2001 severity bands) |
 | GAD-7 anchors | 5, 10, 15 | literature (Spitzer 2006) |
