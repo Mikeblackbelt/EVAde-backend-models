@@ -19,4 +19,4 @@ Where training and validation data for Blindsight can come from, with access ter
 
 ## Order of acquisition
 
-Start with open datasets to build and test the pipeline (PhysioNet, TUSZ or CHB-MIT, SeizeIT2, WESAD). Submit NASA OSDR and LSDA (Human Research Program) requests early because approval takes time; real astronaut EEG or ECG streams are not public. See [planning/implementation-pipeline.md](../planning/implementation-pipeline.md).
+Start with open datasets to build and test the pipeline (PhysioNet including Siena and CHB-MIT, SeizeIT2, WESAD; TUSZ is not used). Submit NASA OSDR and LSDA (Human Research Program) requests early because approval takes time; real astronaut EEG or ECG streams are not public. See [planning/implementation-pipeline.md](../planning/implementation-pipeline.md).

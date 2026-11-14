@@ -8,7 +8,7 @@
 
 | Priority | Source | Use | Access note |
 |---|---|---|---|
-| 1 | PhysioNet (MIT-BIH, PTB-XL, BIDMC, Sleep-EDFx), TUSZ, CHB-MIT, SeizeIT2, WESAD | Reproduce published baselines; build and test the pipeline on open data | see [data-collection-sources](../data-collection-sources/README.md) |
+| 1 | PhysioNet (MIT-BIH, PTB-XL, BIDMC, Sleep-EDFx, Siena, CHB-MIT, EEG During Mental Arithmetic), SeizeIT2, WESAD (TUSZ not used; see [data-acquisition-plan.md](data-acquisition-plan.md)) | Reproduce published baselines; build and test the pipeline on open data | see [data-collection-sources](../data-collection-sources/README.md) |
 | 2 | NASA Open Science Data Repository (OSDR) incl. RadLab | Radiation and spaceflight biology; public processed data | public; controlled human data needs a request |
 | 3 | NASA Life Sciences Data Archive (LSDA) via the NASA Human Research Program portal | Astronaut physiology, bone, behavioral data | request, review, and IRB-style approval; weeks to months, so start the request early |
 | 4 | Simulated-mission and analog data (collected by the team) | Time-in-mission behavior | needs ethics approval; none exists yet |
@@ -103,7 +103,7 @@ Rules: every response carries `model_id`, `model_version`, `data_version`, `qual
 
 | Step | Deliverable | Exit criterion |
 |---|---|---|
-| 1 | Ingestion and manifest for MIT-BIH, TUSZ or CHB-MIT, and radiation telemetry | reproducible loaders; split files versioned |
+| 1 | Ingestion and manifest for MIT-BIH, Siena or CHB-MIT, and radiation telemetry | reproducible loaders; split files versioned |
 | 2 | Preprocessing as tested functions | unit tests on synthetic and real fixtures; retention rates reported |
 | 3 | Baseline models, registered | baseline numbers within tolerance of published values |
 | 4 | FastAPI skeleton with `/health`, `/models`, schemas, CORS | frontend can call a mock |

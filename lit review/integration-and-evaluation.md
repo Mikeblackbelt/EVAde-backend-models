@@ -85,7 +85,7 @@ Models reach the frontend and cloud services through a stateless FastAPI service
 
 | Phase | Goal | Exit criterion |
 |---|---|---|
-| 0 | Reproduce published baselines on public data (MIT-BIH QRS, TUSZ or CHB-MIT seizure, WESAD stress) | numbers within a stated tolerance of published results |
+| 0 | Reproduce published baselines on public data (MIT-BIH QRS, Siena or CHB-MIT seizure with SeizeIT2 as external test, WESAD stress) | numbers within a stated tolerance of published results |
 | 1 | Single-stream pilots with reference sensors | MAE and agreement targets met on a pilot cohort |
 | 2 | Quality layer and shared schema | SQI and radiation flag in every record; schema documented |
 | 3 | Per-person baselines and trend flags | false-alarm rate and sensitivity reported with intervals |

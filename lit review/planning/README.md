@@ -20,6 +20,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 | [risk-score.md](risk-score.md) | Five domains, anchor tables, noisy-OR aggregation (version 2), flag, overrides, data-quality handling, bands, actions |
 | [days-to-return.md](days-to-return.md) | The DTR formula, trend adjustment, hard-limit times (including the extreme-domain cap), logistics floor, intervals, display rules |
 | [worked-examples.md](worked-examples.md) | Three scenarios computed by hand, plus single-domain sensitivity |
+| [data-acquisition-plan.md](data-acquisition-plan.md) | Per-modality data sources (public research data, no TUSZ), access steps, gaps, and an action checklist |
 | [implementation-pipeline.md](implementation-pipeline.md) | Three-stage build plan: data ingestion and preprocessing, model training, FastAPI endpoints (`/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`), CORS, Pydantic, latency budget, build order |
 | [calibration-and-validation.md](calibration-and-validation.md) | How the numbers would be fitted and tested, targets, failure modes, governance |
 
