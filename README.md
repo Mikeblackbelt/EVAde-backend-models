@@ -12,7 +12,7 @@ Backend models for **EVAde**, a space health monitoring platform that helps astr
 | Hazards | radiation exposure, bone density loss |
 | Per-person baseline | every metric is compared with the person's own baseline; every API call carries a unique pseudonymous `user_id` |
 | Risk score | an automatic score R in (0, 1) from five domains (noisy-OR aggregation) |
-| Days to return | a recommended time to return, shown as "<5", 5 to 100, or ">100" days |
+| maximum days to return | a recommended maximum time to return, shown as "<5", 5 to 100, or ">100" days |
 | API | FastAPI endpoints such as `/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`, `/compare`, and `/ingest/*` |
 
 ## Where to look
@@ -21,7 +21,7 @@ Backend models for **EVAde**, a space health monitoring platform that helps astr
 |---|---|
 | [lit review/](lit%20review/README.md) | Verified literature review by topic (radiation, vital signs, ECG, EEG, bone, behavioral health), model architectures, integration and evaluation protocol, and data sources. Each source is labeled VERIFIED, PARTIAL, or UNVERIFIED. |
 | [lit review/lit-review.pdf](lit%20review/lit-review.pdf) | The whole review and planning set as one research-style PDF (rebuild after edits). |
-| [lit review/planning/](lit%20review/planning/README.md) | Theory-only design: [risk score](lit%20review/planning/risk-score.md), [days to return](lit%20review/planning/days-to-return.md), [worked examples](lit%20review/planning/worked-examples.md), [implementation pipeline](lit%20review/planning/implementation-pipeline.md), [data acquisition plan](lit%20review/planning/data-acquisition-plan.md), [baseline comparison and integration](lit%20review/planning/baseline-comparison.md), [Bluetooth integration](lit%20review/planning/bluetooth-device-integration.md), and [calibration and validation](lit%20review/planning/calibration-and-validation.md). |
+| [lit review/planning/](lit%20review/planning/README.md) | Theory-only design: [risk score](lit%20review/planning/risk-score.md), [maximum days to return](lit%20review/planning/max-days-to-return.md), [worked examples](lit%20review/planning/worked-examples.md), [implementation pipeline](lit%20review/planning/implementation-pipeline.md), [data acquisition plan](lit%20review/planning/data-acquisition-plan.md), [baseline comparison and integration](lit%20review/planning/baseline-comparison.md), [Bluetooth integration](lit%20review/planning/bluetooth-device-integration.md), and [calibration and validation](lit%20review/planning/calibration-and-validation.md). |
 | [MODEL_REGISTRY.md](MODEL_REGISTRY.md) | Every retained model architecture and trained model gets a unique ID `EVA-[n]`, numbered in order of creation. |
 | `external/Blindsight-Data-Nasa` | The team's earlier prototype, added as a git submodule (pinned commit, no license, so referenced and not copied). Run `git submodule update --init` to fetch it. |
 | `data/` | Local data folder. Git-ignored except `data/README.md` and `data/MANIFEST.csv`. Raw datasets are never committed. |
@@ -38,7 +38,7 @@ Backend models for **EVAde**, a space health monitoring platform that helps astr
 
 - Sources were checked at the record and abstract level; full texts were mostly not read, so numbers must be re-checked before formal use.
 - No spaceflight ECG or EEG at scale is publicly available. Models would be trained on terrestrial data, and spaceflight performance is unknown until analog or NASA data are tested.
-- Risk score and days-to-return parameters are design assumptions pending expert elicitation and calibration.
+- Risk score and max-days-to-return parameters are design assumptions pending expert elicitation and calibration.
 - Known open gaps are listed in each section of the review.
 
 ## Working with the repository

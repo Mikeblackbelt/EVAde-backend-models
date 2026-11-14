@@ -65,7 +65,7 @@ Each gate lists the protocol metric, the reference, and the pass criterion. A mo
 | Sensor-derived trend flags | sensitivity at a fixed false-alarm rate per person-month; AUROC with subject-level CI; time-forward and cross-year validation (GLOBEM style, *cited*) | operating point pre-registered; no claim of diagnosis |
 | Reliability | test-retest intraclass correlation for repeated measures; agreement of PVT lapses with the standard definition (*cited*: Basner and Dinges 2011) | ICC reported; no pass number |
 
-## 3. Fitness gates for the risk score and days to return
+## 3. Fitness gates for the risk score and maximum days to return
 
 | What | Protocol and metrics | Pass criterion (design unless noted) |
 |---|---|---|
@@ -74,7 +74,7 @@ Each gate lists the protocol metric, the reference, and the pass criterion. A mo
 | Operating points | alerts per person-month by band; sensitivity for override-class events | the targets in [calibration-and-validation.md](calibration-and-validation.md): at most 1 per person-month at "high" or above in a healthy cohort; sensitivity at least 0.90 for override-class events |
 | Clinical usefulness | decision curve analysis (net benefit across threshold probabilities, Vickers and Elkin) (*recalled*) | net benefit at the "high" threshold above treat-all and treat-none |
 | Band agreement | weighted Cohen's kappa between model bands and an expert panel on rated cases | at least 0.60 (*design*) |
-| Days to return | MAE in days against the expert panel's recommended return time; share within plus or minus 20%; asymmetric error check, because a too-long DTR is worse than a too-short one | MAE and within-20% share reported; the share of too-long errors above 20% capped (*design*) |
+| maximum days to return | MAE in days against the expert panel's recommended return time; share within plus or minus 20%; asymmetric error check, because a too-long MDTR is worse than a too-short one | MAE and within-20% share reported; the share of too-long errors above 20% capped (*design*) |
 | Domain-score consistency | each domain's component scores checked against that domain's protocol gate in section 2 | a domain whose gate fails is shown in shadow mode and excluded from the flag test |
 | Reporting | TRIPOD+AI for the prediction model report and PROBAST+AI for risk of bias (*recalled*) | checklists completed with each model card |
 

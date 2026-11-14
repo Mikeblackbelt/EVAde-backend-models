@@ -125,7 +125,7 @@ Work is on branch `integrate-blindsight-data-nasa`. The prototype is a submodule
 | 4 | Add `user_id` to the WebSocket and the REST routes; replace the global `ACTION_LOG` with a per-user store; add CORS allow-list, token auth, and payload limits | meets the service requirements |
 | 5 | Use `stream/simulator.py` scenarios as the test source for `/compare`; add a `ReplaySource` for open datasets (WESAD, Siena, CHB-MIT) | tests with known deviations |
 | 6 | Use `models/mission.py` to generate synthetic sleep, radiation, bone, HRV, and blood-pressure series for the hackathon, labelled synthetic | covers modalities with no instant data |
-| 7 | Map `component_score` to the domain scores and call the risk and DTR formulas | `/predict/risk` works end to end |
+| 7 | Map `component_score` to the domain scores and call the risk and MDTR formulas | `/predict/risk` works end to end |
 | 8 | Keep `models/actions.py` as the action text, with the story owner adding sources; show actions only for flags, with the claim language from [integration-and-evaluation.md](../integration-and-evaluation.md) | consistent wording |
 | 9 | Do not serve `state_model.joblib`; keep `train.py` as a starting point; register any retrained model in [MODEL_REGISTRY.md](../../MODEL_REGISTRY.md) | no unvalidated model in the API |
 

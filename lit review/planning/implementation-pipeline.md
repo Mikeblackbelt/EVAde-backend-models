@@ -46,7 +46,7 @@ Libraries named in the task (pandas, NumPy, SciPy) cover this stage; domain libr
 | EEG | seizure or drowsiness flag per window | features plus boosted trees, then EEGNet |
 | Radiation | exposure-based radiation domain score | rule-based formulas from [risk-score.md](risk-score.md); no learned model because no labeled spaceflight outcome data exist |
 | Behavioral | deviation from personal baseline | per-person robust z-score |
-| Aggregate | risk score R and days to return | formulas in [risk-score.md](risk-score.md) and [days-to-return.md](days-to-return.md) |
+| Aggregate | risk score R and maximum days to return | formulas in [risk-score.md](risk-score.md) and [max-days-to-return.md](max-days-to-return.md) |
 
 "Cardiovascular strain", "cognitive fatigue", and "high-risk radiation threshold" in the task are treated as *flag outputs for human review*, not diagnoses.
 
@@ -69,7 +69,7 @@ Libraries named in the task (pandas, NumPy, SciPy) cover this stage; domain libr
 | `/predict/ecg` | POST | one window of samples plus sampling rate, lead name, participant ID, UTC start | quality index, rhythm or quality flag with probability, HR and HRV features, model `EVA-[n]`, uncertainty |
 | `/predict/eeg` | POST | one window (channels by samples), montage, sampling rate, participant ID, UTC start | quality index, seizure or drowsiness flag with probability, model ID, uncertainty |
 | `/predict/radiation-risk` | POST | dose-rate or dose samples, SEU count, solar-particle-event flag, cumulative dose to date | radiation domain score in [0, 1], remaining-dose margin, confidence, rule version |
-| `/predict/risk` | POST | latest domain scores or raw features for one participant | R in (0, 1), band, DTR display ("<5", 5-100, ">100"), top contributing domains |
+| `/predict/risk` | POST | latest domain scores or raw features for one participant | R in (0, 1), band, MDTR display ("<5", 5-100, ">100"), top contributing domains |
 | all `/predict/*` | POST | every call also carries a unique `user_id`; baseline comparison fields are returned with the prediction (see [baseline-comparison.md](baseline-comparison.md)) |
 | `/devices/bind`, `/ingest/batch`, `/ingest/stream` | POST, POST, WebSocket | Bluetooth sensor data from a client near the person ([bluetooth-device-integration.md](bluetooth-device-integration.md)) |
 | `/models` | GET | none | registry IDs, status, and data version of every served model |
@@ -97,7 +97,7 @@ Rules: every response carries `model_id`, `model_version`, `data_version`, `qual
 
 ### 3.3 Integration with the rest of the system
 
-- **Frontend ("Frankend"):** consumes JSON; needs the display rules for R and DTR from [days-to-return.md](days-to-return.md) and the claim language in the integration document ("flags a window as suspect for review", not "detects arrhythmia").
+- **Frontend ("Frankend"):** consumes JSON; needs the display rules for R and MDTR from [max-days-to-return.md](max-days-to-return.md) and the claim language in the integration document ("flags a window as suspect for review", not "detects arrhythmia").
 - **Cloud services:** Workers handle auth, rate limiting, and storage writes; the model service is stateless so it can scale and restart safely. Storage of results follows the retention rules in the integration document.
 - **Human review:** hard-rule overrides in [risk-score.md](risk-score.md) escalate through the frontend to a named reviewer; the API never triggers an action.
 

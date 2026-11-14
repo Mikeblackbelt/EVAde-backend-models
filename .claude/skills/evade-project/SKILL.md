@@ -34,14 +34,14 @@ Cloudflare (hosting, Workers, database/edge functions), Auth0 moving to Cloudfla
 ## Repo map (read these before changing things)
 
 - `lit review/` : verified literature review by topic (radiation, vitals, ECG, EEG, bone, behavioral, architectures, integration, data sources) and `lit-review.pdf` (rebuild after edits).
-- `lit review/planning/` : theory-only design. Key files: `risk-score.md` (noisy-OR, version 2), `days-to-return.md`, `worked-examples.md`, `implementation-pipeline.md`, `data-acquisition-plan.md`, `baseline-comparison.md`, `bluetooth-device-integration.md`, `calibration-and-validation.md`.
+- `lit review/planning/` : theory-only design. Key files: `risk-score.md` (noisy-OR, version 2), `max-days-to-return.md`, `worked-examples.md`, `implementation-pipeline.md`, `data-acquisition-plan.md`, `baseline-comparison.md`, `bluetooth-device-integration.md`, `calibration-and-validation.md`.
 - `MODEL_REGISTRY.md` : every retained architecture or trained model gets `EVA-[n]` in creation order; never reused.
 - `external/Blindsight-Data-Nasa` : team prototype as a git submodule (no license; reference, do not copy).
 
 ## Design facts to keep consistent
 
 - Risk score R in (0, 1): per-domain p = c x 0.75 x max(0, (s - 0.10)/0.90), L = sum of -ln(1 - p), R = 0.005 + 0.99 x (1 - e^-L). A domain with s at or above 0.30 floors displayed R at 0.60. Hard-rule overrides floor R at 0.80.
-- Days to return: DTR = 150 x (1 - R)^1.5 with trend, radiation, bone, acute, and extreme-domain caps (any eligible domain at s 0.80 or more gives under 10 days). Display "<5", 5 to 100, or ">100".
+- maximum days to return: MDTR = 150 x (1 - R)^1.5 with trend, radiation, bone, acute, and extreme-domain caps (any eligible domain at s 0.80 or more gives under 10 days). Display "<5", 5 to 100, or ">100".
 - Everything is compared with the person's **own baseline** (robust z, median and MAD); every API call carries a unique pseudonymous `user_id`.
 - Endpoints planned: `/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`, `/compare`, `/ingest/*`, `/users`, `/models`, `/health`.
 
