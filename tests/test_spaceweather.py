@@ -498,7 +498,7 @@ def test_service_start_loads_spaceweather_only_with_draft_and_matching_hash(tmp_
     monkeypatch.setitem(appmod.STATE.models, "spaceweather", sw)
     d_models = C.get("/v1/models", headers=H).json()["data"]
     assert [m for m in d_models["models"] if m["task"] == "spaceweather"][0]["model_id"] == "EVA-8"
-    assert all(u["task"] != "spaceweather" for u in d_models["unavailable"])
+    assert all(u["task"] != "spaceweather" for u in d_models["unavailable"])   # loaded: listed once, as a model
     with open(d / "model.joblib", "ab") as f:
         f.write(b"tampered")
     assert appmod.load_spaceweather() is None                 # hash mismatch: nowcast and dose run without it

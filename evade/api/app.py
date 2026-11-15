@@ -604,9 +604,10 @@ def models():
                      "headline": headline(task, m), "format": man.get("format"), "input": man.get("input"),
                      "output": man.get("output"), "code_commit": man.get("code_commit"),
                      "trained_at": man.get("trained_at"), "data": man.get("data")})
-    # spaceweather/ has its own loader (load_spaceweather); the manifest registry cannot read its manifest
+    # spaceweather/ is loaded by load_spaceweather (its manifest predates the registry contract): once loaded it is
+    # in STATE.models and drops out of this list; if it did not load, the registry's entry says it is unavailable
     unavailable = [e for e in STATE.registry.listing() if not e["available"] and e["task"] not in STATE.models
-                   and e["task"] not in DEEP_TASKS and e["task"] != "spaceweather"]
+                   and e["task"] not in DEEP_TASKS]
     return envelope(None, {"models": rows, "unavailable": unavailable, "deep_models": deep_listing(),
                            "draft_served": os.environ.get("EVADE_ALLOW_DRAFT") == "1",
                            "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison",
