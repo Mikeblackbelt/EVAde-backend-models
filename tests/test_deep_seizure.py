@@ -4,6 +4,8 @@ external set -> ONNX export and manifest. Plus unit tests of the metric helpers.
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -112,15 +114,17 @@ def test_pack_shards(packed):
     assert len(z["y"]) == len(z["rec"]) == len(z["start_s"]) == z["X"].shape[0]
     assert set(np.unique(z["y"])) <= {-1, 0, 1} and (z["y"] == 1).sum() > 0
     assert list(z["records"]) == ["chb01_01", "chb01_02"] and len(z["sz_rec"]) == 1
-    # per-person stats come from non-ictal windows only: ictal 300 uV rhythm inflates the all-window MAD
-    assert np.all(z["norm_mad"] < z["norm_mad_all"])
-    med, mad = seizure_pack.robust_channel_stats(z["X"], z["y"] == 0, z["rec_present"][z["rec"]])
-    np.testing.assert_allclose(mad, z["norm_mad"], rtol=1e-5)
-    # missing channel: stats only from records that have it; the 5-channel record is excluded
+    # stored windows are per-window robust z: no per-person statistics in the shard
+    assert str(z["norm"]) == "per_window_robust" and not any(k.startswith("norm_m") for k in z.files)
+    X = z["X"].astype(np.float32)
+    assert np.abs(X).max() <= 20.0
+    np.testing.assert_allclose(np.median(X, axis=2), 0.0, atol=0.02)
+    np.testing.assert_allclose(1.4826 * np.median(np.abs(X), axis=2), 1.0, atol=0.02)
+    # missing channel stays exactly 0; the 5-channel record is excluded
     c3 = np.load(out / "chbmit" / "chb03.npz", allow_pickle=False)
     k = list(config.BIPOLAR_NAMES).index("FZ-CZ")
     assert list(c3["records"]) == ["chb03_01", "chb03_02"] and not c3["rec_present"][1, k]
-    assert c3["norm_mad"][k] > 10.0 * seizure_pack.MAD_FLOOR_UV
+    assert np.all(c3["X"][c3["rec"] == 1, k] == 0) and np.abs(c3["X"][c3["rec"] == 0, k]).max() > 1.0
     s = np.load(out / "siena" / "PN00.npz", allow_pickle=False)
     assert s["X"].shape[1:] == (18, 1024) and float(s["fs"]) == 256.0
     np.testing.assert_allclose(np.c_[s["sz_start_s"], s["sz_end_s"]], [[40, 70], [150, 190]])
@@ -129,6 +133,94 @@ def test_pack_shards(packed):
     summ = json.loads((out / "pack_summary.json").read_text())
     assert summ["chbmit"]["cases"] == 3 and summ["siena"]["seizures"] == 2
     assert summ["chbmit"]["excluded_records"] == 1
+
+
+def test_per_window_robust_matches_api():
+    """Same numbers as the API adapter's per_window_robust (evade/models/deep_tasks.py SeizureAdapter.predict)."""
+    rng = np.random.default_rng(3)
+    w = rng.normal(0, 40, (5, 18, 1024)) + rng.standard_t(2, (5, 18, 1024)) * 30
+    w[1, 4] = 0.0                                                  # a zero-filled (missing) channel
+    med = np.median(w, axis=2, keepdims=True)                      # the API's lines, verbatim
+    api = np.clip((w - med) / np.maximum(1.4826 * np.median(np.abs(w - med), axis=2, keepdims=True), 1e-6), -20, 20)
+    np.testing.assert_allclose(seizure_pack.per_window_robust(w), api, atol=1e-4)
+    assert np.all(seizure_pack.per_window_robust(w)[1, 4] == 0)
+
+
+def test_resumed_pack_replays_log_and_rebuilds_stale(packed, capsys):
+    tmp, out = packed
+    replay = tmp / "replay"
+    (replay / "chbmit").mkdir(parents=True)
+    shutil.copy(out / "chbmit" / "chb03.npz", replay / "chbmit" / "chb03.npz")
+    with pytest.MonkeyPatch.context() as mp:
+        if not HAVE_EDF:
+            mp.setattr(seizure_pack, "read_edf", _fake_read_edf)
+        mp.setattr(seizure_pack, "process_record", None)                 # a finished shard must not be re-read
+        assert seizure_pack.main(["--chb", str(tmp / "chb"), "--out", str(replay), "--workers", "1",
+                                  "--cases", "chb03"]) == 0
+        assert "EXCLUDED chb03_03.edf" in capsys.readouterr().out          # replayed from the finished shard
+        summ = json.loads((replay / "pack_summary.json").read_text())
+        mp.undo()
+        if not HAVE_EDF:
+            mp.setattr(seizure_pack, "read_edf", _fake_read_edf)
+        assert summ["chbmit"]["excluded_records"] == 1
+        # a shard from the old normalization (no norm field) is rebuilt, never reused
+        stale = out / "stale"
+        (stale / "chbmit").mkdir(parents=True)
+        np.savez(stale / "chbmit" / "chb02.npz", y=np.zeros(1, np.int8))
+        assert seizure_pack.main(["--chb", str(tmp / "chb"), "--out", str(stale), "--workers", "1",
+                                  "--cases", "chb02"]) == 0
+    z = np.load(stale / "chbmit" / "chb02.npz", allow_pickle=False)
+    assert str(z["norm"]) == "per_window_robust" and len(z["y"]) > 1
+
+
+def test_download_selection_matches_pack_rule(packed):
+    from evade.training import data as beta_data
+    from evade.training.deep import seizure_select
+    tmp, _ = packed
+    root = tmp / "chb"
+    lines = [f"{'0' * 64}  {p.relative_to(root).as_posix()}" for p in sorted(root.rglob("*")) if p.is_file()]
+    for max_free in (0, 1, -1):
+        got = [ln.split()[1] for ln in seizure_select.select("chbmit", root, lines, max_free) if ln.endswith(".edf")]
+        want = [f"{case}/{Path(edf).name}" for edf, _, case in beta_data.chb_jobs(root, 10 ** 6 if max_free < 0
+                                                                                   else max_free)]
+        assert got == want
+    sroot = tmp / "siena"
+    slines = [f"{'0' * 64}  {p.relative_to(sroot).as_posix()}" for p in sorted(sroot.rglob("*")) if p.is_file()]
+    got = [ln.split()[1] for ln in seizure_select.select("siena", sroot, slines, 0)]
+    want = [f"{s}/{Path(edf).name}" for edf, _, s in beta_data.siena_jobs(sroot, 0)]
+    assert [g for g in got if g.endswith(".edf")] == want and "PN00/Seizures-list-PN00.txt" in got
+    with pytest.raises(FileNotFoundError):                 # a missing summary is an error, never "no seizures"
+        seizure_select.select("chbmit", tmp / "nowhere", lines, 3)
+
+
+def test_sigusr1_on_last_step_validates_then_resumes(packed):
+    """1-epoch run (the smoke setting): a signal on the last step validates, saves best.pt, exits 99; resume ends."""
+    tmp, out = packed
+    run = tmp / "laststep"
+    args = ["--data", str(out), "--arch", "seizure_tiny", "--epochs", "1", "--epoch-windows", "96", "--bs", "32",
+            "--n-boot", "10", "--inner-val", "1", "--cases", "chb01,chb02,chb03", "--protocol", "loso",
+            "--run", str(run), "--resume"]
+    real_augment = seizure_train.augment
+    calls = {"n": 0}
+
+    def augment_signal_on_third(*a):                     # 96 // 32 = 3 steps: signal on the last one
+        calls["n"] += 1
+        if calls["n"] == 3:
+            seizure_train.STOP["flag"] = True
+        return real_augment(*a)
+
+    try:
+        with pytest.MonkeyPatch.context() as mp, pytest.raises(SystemExit) as e:
+            mp.setattr(seizure_train, "augment", augment_signal_on_third)
+            seizure_train.main(args)
+    finally:
+        seizure_train.STOP["flag"] = False
+    assert e.value.code == 99
+    fd = run / "fold_chb01"
+    ck = torch.load(fd / "last.pt", weights_only=True)
+    assert (ck["epoch"], ck["step"]) == (0, 3) and len(ck["hist"]) == 1 and (fd / "best.pt").exists()
+    assert seizure_train.main(args) == 0
+    assert json.loads((fd / "result.json").read_text())["epochs_run"] == 1
 
 
 def test_end_to_end_train_resume_export(packed):
@@ -173,10 +265,13 @@ def test_end_to_end_train_resume_export(packed):
     exp = tmp / "export" / "seizure"
     assert seizure_export.main(["--run", str(final), "--out", str(exp)]) == 0
     man = json.loads((exp / "manifest.json").read_text())
-    assert man["format"] in ("onnx", "torchscript") and man["task"] == "seizure_window"
+    assert man["format"] in ("onnx", "torchscript") and man["task"] == "seizure_deep"
     assert man["input"]["tensor_shape"] == ["batch", 18, 1024] and man["input"]["fs_hz"] == 256.0
-    assert man["input"]["normalization"]["type"] == "per_person_per_channel_robust"
-    assert [o["name"] for o in man["output"]["operating_points"]] == ["suspect_seizure", "review"]
+    assert man["input"]["normalization"]["type"] == "per_window_robust" and man["input"]["smooth_windows"] == 3
+    ops = man["output"]["operating_points"]
+    assert [(o["name"], o["target_fpr"]) for o in ops] == [("review", 0.05), ("suspect_seizure", 0.01)]
+    assert 0.0 <= ops[0]["threshold"] <= ops[1]["threshold"] <= 1.0
+    assert "OOF" in ops[0]["estimate"] and m["per_fold_thresholds"]["spread"]["0.01"]["min"] <= 1.0
     for f, h in man["files_sha256"].items():
         assert seizure_export.sha256(exp / f) == h
     assert (exp / "SHA256SUMS").read_text().count("\n") == 4

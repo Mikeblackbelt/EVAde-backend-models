@@ -11,12 +11,14 @@ Protocols:
          the operating points (thresholds at 1% and 5% pooled out-of-fold FPR).
   final  train on every subject of --cases (minus the inner validation subjects), then score the external set
          (Siena) once at the thresholds of --thresholds-from (the CHB-MIT out-of-fold operating points).
-Input: each window is robust-scaled per channel with its person's median and 1.4826 x MAD from that person's
-non-ictal windows (seizure_pack.py), clipped to +-20. --norm all reproduces the beta's all-windows rule.
+Input: the shards are already normalized per window and channel (seizure_pack.per_window_robust, the API's
+per_window_robust rule), so no per-person statistics exist anywhere. Shards from an older normalization are refused.
 Training: balanced batches (half ictal, half non-ictal, ictal drawn with replacement) and BCE by default, or
---sampler random with --loss focal; augmentation: +-0.5 s circular shift, x0.8-1.2 amplitude; fp16 autocast on
-CUDA (V100). SIGUSR1 (sbatch --signal=B:USR1@N) saves last.pt and exits 99; resubmitting resumes and skips
-finished folds. Outputs are seizure-suspect flags for human review, not diagnoses.
+--sampler random with --loss focal; augmentation: +-0.5 s circular shift (no amplitude scaling: the per-window
+normalization removes amplitude); fp16 autocast for training on CUDA (V100); scoring runs in fp32, as the API does.
+SIGUSR1 (sbatch --signal=B:USR1@N) saves last.pt and exits 99 (mid-epoch, or after the epoch's validation if it
+arrives on the last step); resubmitting resumes and skips finished folds. Outputs are seizure-suspect flags for
+human review, not diagnoses.
 """
 from __future__ import annotations
 
@@ -32,12 +34,13 @@ import numpy as np
 import torch
 from torch import nn
 
+from .. import metrics as M
+from ..train import smooth_by_record
 from . import seizure_eval as E
 from .seizure_models import build
-from .seizure_pack import BETA5, SIENA6
+from .seizure_pack import BETA5, NORM, SIENA6
 
 STOP = {"flag": False}
-NORM_CLIP = 20.0
 BETA = {"model": "EVA-2 beta HistGradientBoosting on band-power features (chb01-05 LOSO, Siena-6 external)",
         "pooled_auroc": 0.967, "subject_auroc_mean": 0.986, "subject_auroc_ci95": [0.969, 0.997],
         "sensitivity_at_1pct_fpr_subject_mean": 0.35, "sensitivity_at_1pct_fpr_ci95": [0.20, 0.51],
@@ -61,10 +64,15 @@ def check_stop():
 class Shards:
     """Windows of several shards in one float16 array, plus per-window subject, record and label arrays."""
 
-    def __init__(self, files: list[Path], norm: str, smoke: bool, rec_offset: int = 0):
+    def __init__(self, files: list[Path], smoke: bool, rec_offset: int = 0):
+        if not files:
+            raise RuntimeError("no shards found; run seizure_prep.sbatch (seizure_pack) first")
         meta, total = [], 0
         for f in files:
             z = np.load(f, allow_pickle=False)
+            if "norm" not in z.files or str(z["norm"]) != NORM:
+                raise RuntimeError(f"{f} was packed with an older normalization (want {NORM}); re-run the prep job, "
+                                   "which rebuilds stale shards")
             y = z["y"]
             keep = np.arange(len(y))
             if smoke:
@@ -73,8 +81,7 @@ class Shards:
             meta.append((f, keep)); total += len(keep)
             T = int(round(float(z["fs"]) * E.WIN_S))      # (reading z["X"] here would load the whole shard twice)
         self.X = np.empty((total, 18, T), np.float16)
-        ys, sh, rec, st, self.subjects, self.cases, self.med, self.mad = [], [], [], [], [], [], [], []
-        pres = []
+        ys, sh, rec, st, self.subjects, self.cases = [], [], [], [], [], []
         self.records, sz = [], {"subject": [], "rec_key": [], "start_s": [], "end_s": []}
         pos, r0 = 0, rec_offset
         for i, (f, keep) in enumerate(meta):
@@ -85,10 +92,7 @@ class Shards:
             rec.append(z["rec"][keep].astype(np.int64) + r0); st.append(z["start_s"][keep])
             subj = str(z["subject"])
             self.subjects.append(subj); self.cases.append(f.stem)
-            self.med.append(z["norm_median" if norm == "nonictal" else "norm_median_all"])
-            self.mad.append(z["norm_mad" if norm == "nonictal" else "norm_mad_all"])
             self.records += [f"{f.stem}/{r}" for r in z["records"]]
-            pres.append(z["rec_present"] if "rec_present" in z.files else np.ones((len(z["records"]), 18), bool))
             for k, a, b in zip(z["sz_rec"], z["sz_start_s"], z["sz_end_s"]):
                 sz["subject"].append(subj); sz["rec_key"].append(int(k) + r0)
                 sz["start_s"].append(float(a)); sz["end_s"].append(float(b))
@@ -99,22 +103,13 @@ class Shards:
         self.rec = np.concatenate(rec)
         self.start_s = np.concatenate(st).astype(np.float64)
         self.subj = np.asarray(self.subjects)[self.shard]
-        self.med = np.stack(self.med).astype(np.float32)
-        self.mad = np.stack(self.mad).astype(np.float32)
         self.seizures = sz
         self.n_records = r0 - rec_offset
-        self.present = np.concatenate(pres)          # (records, 18), indexed by rec - rec_offset
-        self.rec_offset = rec_offset
 
     def batch(self, idx: np.ndarray, device) -> torch.Tensor:
+        """Windows as stored (already per-window normalized; missing channels are exactly 0), sorted by index."""
         idx = np.sort(idx)
-        x = torch.from_numpy(self.X[idx]).to(device, non_blocking=True).float()
-        s = self.shard[idx]
-        med = torch.from_numpy(self.med[s]).to(device)[:, :, None]
-        mad = torch.from_numpy(self.mad[s]).to(device)[:, :, None]
-        # channels missing from a record stay exactly 0 after normalization (as the API does)
-        keep = torch.from_numpy(self.present[self.rec[idx] - self.rec_offset]).to(device)[:, :, None]
-        return ((x - med) / mad).clamp_(-NORM_CLIP, NORM_CLIP) * keep, idx
+        return torch.from_numpy(self.X[idx]).to(device, non_blocking=True).float(), idx
 
 
 def shard_files(root: Path, dataset: str, cases: str) -> list[Path]:
@@ -128,13 +123,13 @@ def shard_files(root: Path, dataset: str, cases: str) -> list[Path]:
 
 @torch.no_grad()
 def predict(model, d: Shards, idx: np.ndarray, device, bs: int = 1024) -> np.ndarray:
+    """Probabilities in fp32 (no autocast), so thresholds are set on the same precision the API serves."""
     model.eval()
     out = np.empty(len(idx), np.float32)
     for i in range(0, len(idx), bs):
         sel = idx[i:i + bs]
         xb, order = d.batch(sel, device)
-        with torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
-            p = torch.sigmoid(model(xb).float()).squeeze(1).cpu().numpy()
+        p = torch.sigmoid(model(xb).float()).squeeze(1).cpu().numpy()
         # d.batch sorts; map back to the order of sel
         pos = np.searchsorted(order, sel)
         out[i:i + len(sel)] = p[pos]
@@ -154,13 +149,13 @@ class FocalLoss(nn.Module):
 
 
 def augment(x: torch.Tensor, gen: torch.Generator, fs: float) -> torch.Tensor:
+    """Circular shift by up to +-0.5 s. A shift keeps each window's median and MAD, so the shifted window is still
+    exactly per-window normalized; amplitude scaling is left out because serving normalization cancels it."""
     b = x.shape[0]
-    scale = (0.8 + 0.4 * torch.rand(b, 1, 1, generator=gen)).to(x.device)
     shifts = torch.randint(-int(0.5 * fs), int(0.5 * fs) + 1, (b,), generator=gen)
     t = x.shape[2]
     idx = ((torch.arange(t)[None, :] - shifts[:, None]) % t).to(x.device)    # move (b, t), then expand on device
-    x = torch.gather(x, 2, idx[:, None, :].expand(b, x.shape[1], t))
-    return x * scale
+    return torch.gather(x, 2, idx[:, None, :].expand(b, x.shape[1], t))
 
 
 def pick_val(train_subjects: list[str], d: Shards, n_val: int, seed: int) -> list[str]:
@@ -234,7 +229,7 @@ def train_fold(a, d: Shards, train_subjects: list[str], val_subjects: list[str],
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward(); scaler.step(opt); scaler.update(); sched.step()
             tot += float(loss.detach())
-            if STOP["flag"]:
+            if STOP["flag"] and i + 1 < steps:      # on the last step: validate and save first (below)
                 save(ep, i + 1, tot)
                 print(f"  SIGUSR1 at epoch {ep} step {i + 1}/{steps}, checkpoint saved; exiting 99", flush=True)
                 sys.exit(99)
@@ -252,6 +247,9 @@ def train_fold(a, d: Shards, train_subjects: list[str], val_subjects: list[str],
         save(ep, steps, tot)
         print(f"  epoch {ep + 1}/{epochs} loss {tot / steps:.4f} val {val:.4f} best {best:.4f} "
               f"({time.time() - t0:.0f}s)", flush=True)
+        if STOP["flag"]:
+            print(f"  SIGUSR1 at the end of epoch {ep}; validated and checkpointed; exiting 99", flush=True)
+            sys.exit(99)
     model.load_state_dict(torch.load(outdir / "best.pt", map_location=device, weights_only=True))
     info = {"train_subjects": sorted(set(train_subjects) - set(val_subjects)), "val_subjects": val_subjects,
             "best_val_auroc": best, "epochs_run": len(hist), "steps_per_epoch": steps,
@@ -268,7 +266,7 @@ def eval_block(d: Shards, scores: np.ndarray, idx: np.ndarray, thresholds, a) ->
 
 
 def run_loso(a, device) -> dict:
-    d = Shards(shard_files(a.data, "chbmit", a.cases), a.norm, a.smoke)
+    d = Shards(shard_files(a.data, "chbmit", a.cases), a.smoke)
     subjects = sorted(s for s in set(d.subj.tolist()) if (d.y[d.subj == s] == 1).any())
     if a.smoke:
         subjects = subjects[:3]
@@ -299,12 +297,17 @@ def run_loso(a, device) -> dict:
         print(f"fold {s}: test AUROC {info['test_auroc']:.4f}", flush=True)
     idx = np.flatnonzero(np.isin(d.subj, subjects))
     res = eval_block(d, scores[idx], idx, None, a)
+    per_fold = per_fold_thresholds(d, scores, idx, a)
     return {"protocol": "leave-one-subject-out", "cases": d.cases, "subject_alias": {"chb21": "chb01"},
             "folds": [{k: f[k] for k in ("test_subject", "val_subjects", "epochs_run", "best_val_auroc", "test_auroc")}
                       for f in folds],
-            "chbmit_oof": res,
+            "chbmit_oof": res, "per_fold_thresholds": per_fold,
             "operating_points_for_serving": [{"name": "suspect_seizure" if op["target_fpr"] <= 0.01 else "review",
                                               "target_fpr": op["target_fpr"], "threshold": op["threshold"],
+                                              "estimate": "OOF fold-ensemble estimate: pooled out-of-fold scores of "
+                                                          "the LOSO fold models, not of the served final model; the "
+                                                          "FPR holds by construction on these scores",
+                                              "per_fold_threshold_spread": per_fold["spread"].get(f"{op['target_fpr']:g}"),
                                               "sensitivity_oof_subject_mean": op["sensitivity_subject_mean"]["mean"],
                                               "sensitivity_oof_pooled": op["sensitivity_pooled"],
                                               "event_sensitivity_oof": op["event_sensitivity"],
@@ -313,8 +316,25 @@ def run_loso(a, device) -> dict:
                                              for op in res["operating_points"]]}
 
 
+def per_fold_thresholds(d: Shards, scores: np.ndarray, idx: np.ndarray, a) -> dict:
+    """Threshold at each target FPR on each fold's own (smoothed) test scores, and their spread: how far the pooled
+    operating point is from what any single model would pick."""
+    ps = smooth_by_record(scores[idx], d.rec[idx], d.start_s[idx], a.smooth) if a.smooth > 1 else scores[idx]
+    y, subj = d.y[idx], d.subj[idx]
+    by = {}
+    for s in sorted(set(subj.tolist())):
+        m = (subj == s) & (y >= 0)
+        by[s] = {f"{f:g}": float(M.threshold_at_fpr(y[m], ps[m], f)) for f in a.fprs}
+    spread = {}
+    for f in a.fprs:
+        v = np.asarray([t[f"{f:g}"] for t in by.values()], float)
+        if len(v):
+            spread[f"{f:g}"] = {"min": float(v.min()), "median": float(np.median(v)), "max": float(v.max())}
+    return {"by_test_subject": by, "spread": spread}
+
+
 def run_final(a, device) -> dict:
-    d = Shards(shard_files(a.data, "chbmit", a.cases), a.norm, a.smoke)
+    d = Shards(shard_files(a.data, "chbmit", a.cases), a.smoke)
     subjects = sorted(s for s in set(d.subj.tolist()) if (d.y[d.subj == s] == 1).any())
     val_s = pick_val(subjects, d, a.inner_val, a.seed)
     md = a.run / "model"
@@ -328,8 +348,8 @@ def run_final(a, device) -> dict:
         model, info = train_fold(a, d, subjects, val_s, md, device, a.seed)
         (md / "result.json").write_text(json.dumps(info, indent=1))
         (md / "last.pt").unlink(missing_ok=True)
-    norm = {"median_rule": "per person, per channel, from that person's non-ictal windows" if a.norm == "nonictal"
-            else "per person, per channel, from all of that person's windows (beta rule)"}
+    norm = {"type": NORM, "rule": "per window and channel, median and 1.4826 x MAD of the window itself (floor "
+                                  "1e-6), clipped to +-20; no per-person statistics"}
     out = {"protocol": "final (train on all --cases subjects, external test once)", "cases": d.cases,
            "train": {k: info[k] for k in ("train_subjects", "val_subjects", "epochs_run", "best_val_auroc",
                                           "n_train_windows", "n_train_ictal")}, "normalization": norm}
@@ -344,7 +364,7 @@ def run_final(a, device) -> dict:
         files = shard_files(a.data, a.external, "all")
         if a.smoke:
             files = files[:2]
-        e = Shards(files, a.norm, a.smoke)
+        e = Shards(files, a.smoke)
         idx = np.arange(len(e.y))
         p = predict(model, e, idx, device)
         np.savez(a.run / f"preds_{a.external}.npz", score=p, y=e.y, subject=e.subj, start_s=e.start_s, rec=e.rec)
@@ -370,7 +390,6 @@ def main(argv=None) -> int:
     p.add_argument("--external", default="", help="final protocol: external shard folder name (siena)")
     p.add_argument("--thresholds-from", type=Path, help="metrics.json of a loso run (its operating points)")
     p.add_argument("--arch", default="seizure_resnet1d")
-    p.add_argument("--norm", default="nonictal", choices=["nonictal", "all"])
     p.add_argument("--sampler", default="balanced", choices=["balanced", "random"])
     p.add_argument("--loss", default="bce", choices=["bce", "focal"])
     p.add_argument("--epochs", type=int, default=20)
@@ -401,7 +420,7 @@ def main(argv=None) -> int:
     t0 = time.time()
     res = run_loso(a, device) if a.protocol == "loso" else run_final(a, device)
     pack = a.data / "pack_summary.json"
-    res.update({"task": "seizure_window", "arch": a.arch, "norm": a.norm, "sampler": a.sampler, "loss": a.loss,
+    res.update({"task": "seizure_window", "arch": a.arch, "norm": NORM, "sampler": a.sampler, "loss": a.loss,
                 "inner_val": a.inner_val, "max_epochs": a.epochs, "patience": a.patience, "seed": a.seed,
                 "window": {"fs_hz": 256.0, "window_s": E.WIN_S, "step_s": E.STEP_S, "channels": 18},
                 "baseline_beta_eva2": BETA, "smoke": a.smoke, "sec": round(time.time() - t0, 1),
@@ -412,8 +431,10 @@ def main(argv=None) -> int:
                 "limits": ["window and simple event metrics; not a certified SzCORE evaluation",
                            "seizure-free files subsampled per subject (beta rule), so false alarms per hour are "
                            "optimistic or noisy",
-                           "normalization uses the person's non-ictal windows, which assumes a known seizure-free "
-                           "baseline (the API's /baseline); the beta used all windows, ictal included"]})
+                           "normalization is per window (the API's per_window_robust); the beta normalized per "
+                           "person over all windows, ictal included, so the comparison mixes model and input changes",
+                           "operating points are OOF fold-ensemble estimates applied to the final model; the external "
+                           "test at those thresholds is the operating-point check"]})
     if res.get("pack_summary"):
         res["window"]["fs_hz"] = res["pack_summary"]["fs"]
     (a.run / "metrics.json").write_text(json.dumps(res, indent=1, default=float))
