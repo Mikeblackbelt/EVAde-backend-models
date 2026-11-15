@@ -50,6 +50,7 @@ from ..preprocessing.signal import make_windows, signal_quality
 from ..risk.engine import DomainInput, mdtr, radiation_domain, risk
 from ..training.features import EEG_BANDS, ecg_features, spectral_features
 from . import schemas as S
+from .deep_models import DEEP_TASKS, build_router as build_deep_router, deep_listing
 
 API_VERSION = "0.1.0-beta"
 MAX_BODY = 1_000_000
@@ -569,6 +570,8 @@ async def health():               # async: never queued behind a threadpool busy
 def models():
     rows = []
     for task, m in STATE.models.items():
+        if task in DEEP_TASKS:                   # listed once, under deep_models
+            continue
         man = m.get("manifest") or {}
         verified = bool(m.get("sha256_verified"))
         rows.append({"task": task, "model_id": m["model_id"], "status": m["status"], "available": True,
@@ -577,8 +580,9 @@ def models():
                      "headline": headline(task, m), "format": man.get("format"), "input": man.get("input"),
                      "output": man.get("output"), "code_commit": man.get("code_commit"),
                      "trained_at": man.get("trained_at"), "data": man.get("data")})
-    unavailable = [e for e in STATE.registry.listing() if not e["available"] and e["task"] not in STATE.models]
-    return envelope(None, {"models": rows, "unavailable": unavailable,
+    unavailable = [e for e in STATE.registry.listing() if not e["available"] and e["task"] not in STATE.models
+                   and e["task"] not in DEEP_TASKS]
+    return envelope(None, {"models": rows, "unavailable": unavailable, "deep_models": deep_listing(),
                            "draft_served": os.environ.get("EVADE_ALLOW_DRAFT") == "1",
                            "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison"]})
 
@@ -1005,3 +1009,6 @@ def ingest_batch(body: S.IngestBatch):
                                    "comparison_summary": {"n": len(comps), "n_flagged": len(flagged),
                                                           "levels": sorted({c["level"] for c in comps})},
                                    "alerts": alerts_for(comps)}, warnings=warn)
+
+
+app.include_router(build_deep_router())         # deep model endpoints (evade/api/deep_models.py); the middleware checks the key

@@ -52,7 +52,7 @@ gcloud run deploy evade-api --image <image> --region <region> \
 | Endpoint | What it does |
 |---|---|
 | `GET /v1/health` | liveness and which models loaded (key required); never touches storage, so it answers during a D1 outage |
-| `GET /v1/models` | served models from their manifests (`EVA-[n]`, status, format, input and output spec, headline metrics, commit, data, `integrity`: `sha256_verified` or `unverified` for a legacy folder without a pinned hash), plus `unavailable` folders with a generic `reason_code` and `reason` (`draft_not_allowed`, `sha256_mismatch`, `runtime_missing`, `manifest_invalid`, ...; details only in the server log) |
+| `GET /v1/models` | served models from their manifests (`EVA-[n]`, status, format, input and output spec, headline metrics, commit, data, `integrity`: `sha256_verified` or `unverified` for a legacy folder without a pinned hash), plus `unavailable` folders with a generic `reason_code` and `reason` (`draft_not_allowed`, `sha256_mismatch`, `runtime_missing`, `manifest_invalid`, ...; details only in the server log), and `deep_models`: each deep task's state (`mock`, `available` or `unavailable` with a reason) |
 | `POST /v1/users`, `DELETE /v1/users/{id}` | create a pseudonymous user (UUID); delete all of their data, including D1 rows and R2 objects with Cloudflare storage. Returns 503 `deletion_incomplete` if storage fails; the DELETE can be retried, also after a restart, until it returns 200. A completed deletion then gives 404 |
 | `POST /v1/baseline/{modality}` | add ECG or EEG windows, or readings, to the user's baseline; locks after the minimum count (demo: 30 windows) |
 | `POST /v1/baseline/{modality}/confirm`, `/reset` | confirm a provisional baseline; archive and start over |
@@ -67,6 +67,7 @@ gcloud run deploy evade-api --image <image> --region <region> \
 | `POST /v1/devices/bind`, `GET`/`DELETE /v1/devices/{id}?user_id=` | bind a Bluetooth device to one user (409 if bound to another), status, unbind (also removes a stored binding this process has not loaded, only for its owner) |
 | `POST /v1/ingest/batch` | readings or windows from a bound device with a per-device `seq`; duplicates ignored, gaps counted, results compared with the baseline |
 | `GET /v1/actions?user_id=` | action text for current flags (draft wording, to be reviewed) |
+| `POST /v1/predict/ecg-deep`, `/sleep-deep`, `/seizure-deep`, `POST /v1/models/reload` | deep models. Until their weights exist they return placeholder outputs (`source: "mock"`, `model_id: null`) in the final schema; they switch to the model when its folder appears. See [README_deep_models.md](README_deep_models.md) |
 
 ## Example
 
