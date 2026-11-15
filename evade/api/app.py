@@ -4,28 +4,34 @@ Run:  EVADE_API_TOKEN=... EVADE_MODEL_DIR=~/evade_train_beta EVADE_ALLOW_DRAFT=1
 Env:
   EVADE_API_TOKEN      shared bearer token (required; the hackathon uses one shared token plus user_id)
   EVADE_CORS_ORIGINS   comma-separated allow-list (default: none)
-  EVADE_MODEL_DIR      folder with seizure/ and ecg/ beta model outputs (optional)
+  EVADE_MODEL_DIR      folder of model folders <task>/manifest.json (evade/models/README.md); optional
   EVADE_ALLOW_DRAFT    "1" to serve draft (beta) models; they are labelled draft in every response
-State is in memory (lost on restart). Outputs are flags for human review, never diagnoses.
+  EVADE_STORAGE        memory (default, state lost on restart) or cloudflare (D1 + R2; see evade/storage)
+Outputs are flags for human review, never diagnoses.
 """
 from __future__ import annotations
 
-import json
+import logging
 import os
 import secrets
 import threading
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .. import storage as storage_mod
 from ..baseline.store import BaselineStore, domain_scores
+from ..models.export import headline_from_metrics
+from ..models.registry import ModelRegistry
+from ..storage import StorageError
 from ..preprocessing import PIPELINE_VERSION, config
 from ..preprocessing.ecg import detect_qrs, hrv_features, preprocess_ecg
 from ..preprocessing.eeg import bipolar_from_monopolar, preprocess_eeg, select_bipolar
@@ -49,10 +55,18 @@ ACTIONS = {
 }
 
 
+log = logging.getLogger("evade.api")
+
+
 class State:
+    """In-memory working state. Every change is also written to self.storage (a no-op cost with the memory
+    backend); with a persistent backend, a user unknown to this process is loaded from storage on first use."""
+
     def __init__(self):
+        self.storage = storage_mod.from_env()
         self.users: dict[str, dict] = {}
-        self.baselines = BaselineStore()
+        self.pending_deletes: set[str] = set()   # storage deletion failed; DELETE may be retried
+        self.baselines = BaselineStore(self.storage)
         self.latest: dict[str, dict] = {}        # user_id -> {modality: [comparisons]}
         self.radiation: dict[str, dict] = {}
         self.overrides: dict[str, set] = {}
@@ -61,24 +75,9 @@ class State:
         self.devices: dict[str, dict] = {}      # device_id -> {user_id, kind, ..., last_seq, last_seen}
         self.eeg_feats: dict[str, dict] = {}    # user_id -> {rows: [...], med, mad}: per-user EEG feature baseline
         self.lock = threading.Lock()
-        self.models = load_models()
-
-
-def load_models() -> dict:
-    out, root = {}, os.environ.get("EVADE_MODEL_DIR")
-    allow = os.environ.get("EVADE_ALLOW_DRAFT") == "1"
-    if not root or not allow:
-        return out
-    import joblib
-    for task, eva in (("seizure", "EVA-2"), ("ecg", "EVA-6")):
-        d = Path(root).expanduser() / task
-        if (d / "model.joblib").exists():
-            m = json.loads((d / "metrics.json").read_text())
-            # joblib unpickles code: EVADE_MODEL_DIR must hold only artifacts built by evade.training on a machine we control
-            out[task] = {"model": joblib.load(d / "model.joblib"),
-                         "features": json.loads((d / "feature_names.json").read_text()),
-                         "metrics": m, "model_id": eva, "status": "draft"}
-    return out
+        # manifests are validated and sha256-checked before loading; bad folders are listed as unavailable
+        self.registry = ModelRegistry.from_env()
+        self.models = self.registry.served()       # task -> {model, features, metrics, model_id, status, manifest}
 
 
 app = FastAPI(title="EVAde model service", version=API_VERSION,
@@ -110,6 +109,13 @@ async def _val_err(request: Request, exc: RequestValidationError):
                         status_code=413 if code == "payload_too_large" else 422)
 
 
+@app.exception_handler(StorageError)
+async def _storage_err(request: Request, exc: StorageError):
+    log.error("storage error: %s", exc)            # backend messages never contain credentials
+    return JSONResponse({"error": {"code": "storage_unavailable", "message": "storage backend unavailable; retry",
+                                   "request_id": getattr(request.state, "rid", None)}}, status_code=503)
+
+
 @app.middleware("http")
 async def _mw(request: Request, call_next):
     request.state.rid = uuid.uuid4().hex[:12]
@@ -120,7 +126,13 @@ async def _mw(request: Request, call_next):
             return JSONResponse({"error": {"code": "length_required", "message": "Content-Length header required"}}, status_code=411)
         if int(cl) > MAX_BODY:
             return JSONResponse({"error": {"code": "payload_too_large", "message": "body over 1 MB"}}, status_code=413)
-    return await call_next(request)
+    resp = await call_next(request)
+    if STATE.baselines.dirty:                      # one batched baseline write per request, outside every lock
+        try:
+            await run_in_threadpool(STATE.baselines.flush)
+        except StorageError as e:                  # kept in memory and marked dirty; the next request retries
+            log.warning("baseline flush failed: %s", e)
+    return resp
 
 
 def auth(authorization: str | None = Header(None)) -> None:
@@ -133,9 +145,41 @@ def auth(authorization: str | None = Header(None)) -> None:
 
 def user(user_id: str) -> dict:
     u = STATE.users.get(user_id)
+    if u is None and STATE.storage.persistent and user_id not in STATE.pending_deletes:
+        u = hydrate(user_id)
     if u is None:
         raise err(404, "user_not_found", "unknown user_id", "user_id")
     return u
+
+
+def hydrate(user_id: str) -> dict | None:
+    """Load a user this process has not seen from persistent storage (remote calls happen outside the lock)."""
+    st = STATE.storage
+    rec = st.get_user(user_id)
+    if rec is None:
+        return None
+    bl, doc, devs, hist = st.get_baselines(user_id), st.get_state(user_id), st.devices_for_user(user_id), st.risk_history(user_id)
+    with STATE.lock:
+        if user_id in STATE.users:
+            return STATE.users[user_id]
+        if st.is_deleted(user_id):
+            return None
+        STATE.users[user_id] = rec
+        if doc.get("latest"):
+            STATE.latest[user_id] = {(c["modality"], c["metric"]): c for c in doc["latest"]}
+        if doc.get("radiation"):
+            r = doc["radiation"]
+            STATE.radiation[user_id] = {**r, "domain": DomainInput(**r["domain"])}
+        if doc.get("overrides"):
+            STATE.overrides[user_id] = set(doc["overrides"])
+        if doc.get("eeg_baseline"):
+            e = doc["eeg_baseline"]
+            STATE.eeg_feats[user_id] = {"rows": [], "med": np.asarray(e["med"], float), "mad": np.asarray(e["mad"], float)}
+        for k, v in devs.items():
+            STATE.devices.setdefault(k, v)
+        STATE.risk_history[user_id] = [tuple(x) for x in hist]
+    STATE.baselines.load(bl)
+    return rec
 
 
 def envelope(user_id: str | None, data: dict, model_ids: list[str] | None = None, warnings: list[str] | None = None) -> dict:
@@ -151,6 +195,26 @@ def remember(user_id: str, comps: list[dict]) -> None:
         cur = STATE.latest.setdefault(user_id, {})
         for c in comps:
             cur[(c["modality"], c["metric"])] = c
+        latest = list(cur.values())
+    now = time.time()
+    STATE.storage.put_state(user_id, "latest", latest)
+    STATE.storage.add_flags(user_id, [{"t": now, **{k: c.get(k) for k in ("domain", "metric", "modality", "level", "z",
+                                                                             "component_score", "confidence")}}
+                                      for c in comps if c.get("level") != "green"])
+
+
+def log_inputs(user_id: str, windows: list, endpoint: str, readings: list = ()) -> None:
+    """Store reading values and window metadata (never the samples, unless EVADE_STORE_RAW_WINDOWS=1 puts them in R2)."""
+    rows = [{"kind": f"reading:{r.modality}", "t_utc": r.t_utc.isoformat(),
+             "meta": {"endpoint": endpoint, "metric": r.metric, "value": r.value, "unit": r.unit, "quality": r.quality}}
+            for r in readings]
+    for w in windows:
+        key = STATE.storage.put_raw_window(user_id, uuid.uuid4().hex, w.model_dump_json().encode()) \
+            if STATE.storage.store_raw_windows else None
+        rows.append({"kind": f"window:{w.modality}", "t_utc": w.t0_utc.isoformat(), "blob_key": key,
+                     "meta": {"endpoint": endpoint, "fs_hz": w.fs_hz, "channels": len(w.channels),
+                              "n_samples": len(w.samples[0]) if w.samples else 0, "source": w.source}})
+    STATE.storage.add_inputs(user_id, rows)
 
 
 def alerts_for(comps: list[dict]) -> list[dict]:
@@ -237,6 +301,7 @@ EEG_FEAT_MIN = 30     # 4 s windows (about 1 minute of EEG) before the seizure m
 
 
 def add_eeg_feature_baseline(user_id: str, feats: np.ndarray) -> None:
+    locked = None
     with STATE.lock:
         if user_id not in STATE.users:
             return
@@ -248,6 +313,9 @@ def add_eeg_feature_baseline(user_id: str, feats: np.ndarray) -> None:
             X = np.asarray(st["rows"])
             med = np.median(X, axis=0)
             st["med"], st["mad"] = med, np.maximum(1.4826 * np.median(np.abs(X - med), axis=0), 1e-6)
+            locked = {"med": st["med"].tolist(), "mad": st["mad"].tolist()}
+    if locked:                                  # only the locked median and MAD are stored, not the rows
+        STATE.storage.put_state(user_id, "eeg_baseline", locked)
 
 
 # ---------------- endpoints ----------------
@@ -261,40 +329,51 @@ def health():
 def models():
     rows = []
     for task, m in STATE.models.items():
-        rows.append({"task": task, "model_id": m["model_id"], "status": m["status"], "headline": headline(task, m["metrics"])})
-    return envelope(None, {"models": rows, "draft_served": os.environ.get("EVADE_ALLOW_DRAFT") == "1",
+        man = m.get("manifest") or {}
+        rows.append({"task": task, "model_id": m["model_id"], "status": m["status"], "available": True,
+                     "headline": headline(task, m), "format": man.get("format"), "input": man.get("input"),
+                     "output": man.get("output"), "code_commit": man.get("code_commit"),
+                     "trained_at": man.get("trained_at"), "data": man.get("data")})
+    unavailable = [e for e in STATE.registry.listing() if not e["available"] and e["task"] not in STATE.models]
+    return envelope(None, {"models": rows, "unavailable": unavailable,
+                           "draft_served": os.environ.get("EVADE_ALLOW_DRAFT") == "1",
                            "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison"]})
 
 
 def headline(task: str, m: dict) -> dict:
-    if task == "seizure":
-        h = m["leave_one_subject_out_chbmit"]["hgb"]
-        return {"loso_pooled_auroc": h["pooled_auroc"], "subject_auroc_ci": h["subject_auroc_ci"],
-                "external_siena_auroc": m.get("external_siena", {}).get("hgb", {}).get("auroc")}
-    if task == "ecg":
-        return {"macro_auroc_test_fold": m["hgb"]["macro_auroc"], "ci95": m["hgb"]["macro_auroc_ci95"]}
-    return {}
+    return (m.get("manifest") or {}).get("headline") or headline_from_metrics(task, m.get("metrics") or {})
 
 
 @app.post("/v1/users", dependencies=[Depends(auth)])
 def create_user(body: S.UserCreate):
     uid = str(uuid.uuid4())
+    rec = {"created_at": time.time(), "cohort": body.cohort, "age_band": body.age_band, "sex": body.sex}
+    STATE.storage.put_user(uid, rec)             # persisted first: a 503 here leaves no half-created user
     with STATE.lock:
-        STATE.users[uid] = {"created_at": time.time(), "cohort": body.cohort, "age_band": body.age_band, "sex": body.sex}
+        STATE.users[uid] = rec
     return envelope(uid, {"user_id": uid, "created_at": datetime.now(timezone.utc).isoformat()})
 
 
 @app.delete("/v1/users/{user_id}", dependencies=[Depends(auth)])
 def delete_user(user_id: str):
+    if user_id not in STATE.pending_deletes:     # a retried delete skips the lookup
+        user(user_id)                            # 404 unless known here or in storage
     with STATE.lock:
-        if user_id not in STATE.users:
-            raise err(404, "user_not_found", "unknown user_id", "user_id")
         STATE.baselines.delete_user(user_id)     # tombstone first, so concurrent requests cannot recreate data
         for d in (STATE.users, STATE.latest, STATE.radiation, STATE.overrides, STATE.risk_history, STATE.inputs, STATE.eeg_feats):
             d.pop(user_id, None)
         for dev in [k for k, v in STATE.devices.items() if v["user_id"] == user_id]:
             del STATE.devices[dev]
-    return envelope(user_id, {"deleted": True})
+        STATE.pending_deletes.add(user_id)
+    try:
+        removed = STATE.storage.delete_user(user_id)   # storage tombstone, every row, every blob under the user's prefixes
+    except StorageError as e:
+        log.error("delete_user storage step failed: %s", e)
+        raise err(503, "deletion_incomplete", "user data removed from this service but not yet from storage; "
+                  "retry DELETE", "user_id") from None
+    with STATE.lock:
+        STATE.pending_deletes.discard(user_id)
+    return envelope(user_id, {"deleted": True, "storage": STATE.storage.name, "blobs_removed": removed.get("blobs", 0)})
 
 
 @app.post("/v1/baseline/{modality}", dependencies=[Depends(auth)])
@@ -325,6 +404,7 @@ def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
                 STATE.baselines.add(body.user_id, modality, k, float(v), quality=q, mode=body.mode, phase=body.phase)
     for r in body.readings:
         STATE.baselines.add(body.user_id, modality, r.metric, r.value, quality=r.quality, mode=body.mode, phase=body.phase)
+    log_inputs(body.user_id, body.windows, f"baseline/{modality}", body.readings)
     rows = [b for b in STATE.baselines.for_user(body.user_id) if b["modality"] == modality]
     return envelope(body.user_id, {"modality": modality, "baselines": rows, "excluded": excluded},
                     warnings=["demo baseline: short windows, label every result as demo"] if body.mode == "demo" else [])
@@ -342,6 +422,7 @@ def baseline_reset(modality: S.Modality, body: S.BaselineReset):
     if modality == "eeg":
         with STATE.lock:
             STATE.eeg_feats.pop(body.user_id, None)
+        STATE.storage.put_state(body.user_id, "eeg_baseline", None)
     return envelope(body.user_id, {"archived": STATE.baselines.reset(body.user_id, modality, body.phase), "reason": body.reason})
 
 
@@ -361,6 +442,7 @@ def compare(body: S.CompareRequest):
         c = STATE.baselines.compare(body.user_id, r.modality, r.metric, r.value, quality=r.quality, unit=r.unit)
         comps.append(c)
     remember(body.user_id, comps)
+    log_inputs(body.user_id, body.windows, "compare", body.readings)
     return envelope(body.user_id, {"comparisons": comps, "domain_scores": domain_scores(comps),
                                    "flags": [{"domain": c["domain"], "metric": c["metric"], "level": c["level"]}
                                              for c in comps if c["level"] != "green"],
@@ -376,6 +458,7 @@ def predict_ecg(body: S.EcgRequest):
     m, q = ecg_window_metrics(w)
     comps = window_comparisons(body.user_id, w)
     remember(body.user_id, comps)
+    log_inputs(body.user_id, [w], "predict/ecg")
     hr, irr = m["hr_bpm"], m["rr_irregularity"]
     if q < 0.5 or not np.isfinite(hr):
         rhythm = {"flag": None, "low_quality": True}
@@ -408,6 +491,7 @@ def predict_eeg(body: S.EegRequest):
     feats, names, m, q, n_present = eeg_window_metrics(w)
     comps = window_comparisons(body.user_id, w)
     remember(body.user_id, comps)
+    log_inputs(body.user_id, [w], "predict/eeg")
     data = {"quality_index": round(q, 3), "channels_mapped": n_present,
             "features": {k: round(v, 4) for k, v in m.items()}, "comparison": comps}
     ids, warn = [], []
@@ -456,6 +540,11 @@ def predict_radiation(body: S.RadiationRequest):
         STATE.radiation[body.user_id] = {"domain": di, "cumulative": body.cumulative_dose_msv, "rate": body.dose_equivalent_rate_msv_per_day}
         if o5:
             STATE.overrides.setdefault(body.user_id, set()).add("O5")
+        ovr = sorted(STATE.overrides.get(body.user_id, set()))
+    STATE.storage.put_state(body.user_id, "radiation", {"domain": asdict(di), "cumulative": body.cumulative_dose_msv,
+                                                        "rate": body.dose_equivalent_rate_msv_per_day})
+    if o5:
+        STATE.storage.put_state(body.user_id, "overrides", ovr)
     return envelope(body.user_id, {"s": round(di.s, 3), "components": parts, "confidence": "low_confidence" if di.q < 0.5 else "ok",
                                    "remaining_allowance_msv": round(600 - body.cumulative_dose_msv, 1),
                                    "t_rad_days": round(max(t_rad, 0.0), 1) if t_rad is not None else None,
@@ -488,8 +577,12 @@ def predict_risk(body: S.RiskRequest):
              cumulative_dose_msv=body.cumulative_dose_msv if body.cumulative_dose_msv is not None else rad.get("cumulative"),
              dose_rate_msv_day=body.dose_rate_msv_day if body.dose_rate_msv_day is not None else rad.get("rate"),
              bone_loss_pct=body.bone_loss_pct, bone_slope_pct_day=body.bone_slope_pct_day)
-    hist.append((time.time(), r.r_mdtr))
-    acts = [{"action_id": f"{d}_{'red' if r.domains[d]['s'] >= 0.6 else 'yellow'}"} for d in r.flag_domains
+    now = time.time()
+    hist.append((now, r.r_mdtr))
+    STATE.storage.add_risk(body.user_id, now, r.r_mdtr, r.band,
+                           {"r_agg": r.r_agg, "r_disp": r.r_disp, "flag": r.flag, "flag_domains": r.flag_domains,
+                            "override_ids": r.override_ids, "provisional": bool(warn), "mdtr": m})
+    acts =[{"action_id": f"{d}_{'red' if r.domains[d]['s'] >= 0.6 else 'yellow'}"} for d in r.flag_domains
             if (d, "red" if r.domains[d]["s"] >= 0.6 else "yellow") in ACTIONS]
     return envelope(body.user_id, {
         "risk": {"r_agg": round(r.r_agg, 3), "r_disp": round(r.r_disp, 3), "band": r.band, "flag": r.flag,
@@ -509,6 +602,8 @@ def self_report(body: S.SelfReport):
     remember(body.user_id, comps)
     with STATE.lock:
         STATE.inputs.setdefault(body.user_id, []).append({"type": "self_report", "t": body.t_utc.isoformat()})
+    STATE.storage.add_inputs(body.user_id, [{"kind": "self_report", "t_utc": body.t_utc.isoformat(),
+                                             "meta": {k: getattr(body, k) for k in ("sleep_quality", "stress", "fatigue", "mood")}}])
     return envelope(body.user_id, {"record_id": uuid.uuid4().hex[:12], "comparison": comps})
 
 
@@ -523,7 +618,9 @@ def instrument(body: S.Instrument):
     if body.instrument == "phq9" and body.answers[8] > 0:
         with STATE.lock:
             STATE.overrides.setdefault(body.user_id, set()).add("O1")
-        esc = {"override": "O1", "message": "clinician contact required within 1 hour"}
+            ovr = sorted(STATE.overrides[body.user_id])
+        STATE.storage.put_state(body.user_id, "overrides", ovr)     # the answers themselves are not stored
+        esc ={"override": "O1", "message": "clinician contact required within 1 hour"}
     return envelope(body.user_id, {"score": score, "severity_band": sev, "escalation": esc,
                                    "note": "screening score, not a diagnosis"})
 
@@ -537,13 +634,17 @@ def actions(user_id: str):
 @app.post("/v1/devices/bind", dependencies=[Depends(auth)])
 def bind_device(body: S.DeviceBind):
     user(body.user_id)
+    # a binding stored for a user this process has not loaded still counts (deleting a user deletes its bindings)
+    stored = STATE.storage.get_device(body.device_id) if STATE.storage.persistent else None
     with STATE.lock:
-        cur = STATE.devices.get(body.device_id)
-        if cur and cur["user_id"] != body.user_id and cur["user_id"] in STATE.users:
+        cur = STATE.devices.get(body.device_id) or stored
+        if cur and cur["user_id"] != body.user_id and (cur["user_id"] in STATE.users or cur is stored):
             raise err(409, "device_already_bound", "device is bound to another user; unbind it first", "device_id")
-        STATE.devices[body.device_id] = {"user_id": body.user_id, "kind": body.kind, "vendor": body.vendor,
-                                         "model": body.model, "firmware": body.firmware, "last_seq": -1,
-                                         "last_seen": None, "battery_pct": None, "gaps": 0}
+        rec = STATE.devices[body.device_id] = {"user_id": body.user_id, "kind": body.kind, "vendor": body.vendor,
+                                               "model": body.model, "firmware": body.firmware, "last_seq": -1,
+                                               "last_seen": None, "battery_pct": None, "gaps": 0}
+        rec = dict(rec)
+    STATE.storage.put_device(body.device_id, rec)
     return envelope(body.user_id, {"device_id": body.device_id, "bound": True})
 
 
@@ -555,6 +656,7 @@ def unbind_device(device_id: str, user_id: str):
         if not cur or cur["user_id"] != user_id:
             raise err(404, "device_not_found", "no such device for this user", "device_id")
         del STATE.devices[device_id]
+    STATE.storage.delete_device(device_id)
     return envelope(user_id, {"device_id": device_id, "bound": False})
 
 
@@ -596,7 +698,10 @@ def ingest_batch(body: S.IngestBatch):
         dev["last_seq"], dev["last_seen"] = body.seq, datetime.now(timezone.utc).isoformat()
         if body.battery_pct is not None:
             dev["battery_pct"] = body.battery_pct
+        dev_rec = dict(dev)
+    STATE.storage.put_device(body.device_id, dev_rec)
     remember(body.user_id, comps)
+    log_inputs(body.user_id, body.windows, "ingest/batch", body.readings)
     flagged = [c for c in comps if c["level"] != "green"]
     return envelope(body.user_id, {"accepted": len(body.windows) + len(body.readings), "duplicates": 0,
                                    "gap_before": max(gap, 0), "next_seq_expected": body.seq + 1,

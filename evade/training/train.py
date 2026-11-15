@@ -4,7 +4,8 @@
   python -m evade.training.train --task sleep   --sleep <root> --out <dir> [--smoke]
   python -m evade.training.train --task ecg     --ptbxl <root> --out <dir> [--smoke]
 
-Each task writes <out>/<task>/metrics.json, model.joblib, feature_names.json and a features parquet cache.
+Each task writes <out>/<task>/metrics.json, model.joblib, feature_names.json, manifest.json (servable by
+evade.models.registry; pass --model-id EVA-<n>) and a features parquet cache.
 Design: gradient boosting on band-power features, with a logistic-regression baseline in the same protocol.
 Beta only: not tuned, not externally validated beyond what is stated in metrics.json.
 """
@@ -47,13 +48,50 @@ def fit(model, X, y, balance: bool = True):
     return model
 
 
-def _write(out: Path, task: str, metrics: dict, model, cols: list[str]) -> None:
+def _specs(task: str, metrics: dict, a=None) -> tuple[dict, dict, object]:
+    """Input spec, output spec and data description for manifest.json (evade/models/README.md)."""
+    from ..preprocessing import config
+    if task == "seizure":
+        h = metrics.get("leave_one_subject_out_chbmit", {}).get("hgb", {})
+        ops = h.get("operating_points", [])
+        thr = {round(o["target_fpr"], 2): o["threshold"] for o in ops}
+        inp = {"kind": "features", "modality": "eeg", "fs_hz": config.FS_TARGET, "window_s": config.EEG_WIN_S,
+               "step_s": config.EEG_STEP_S, "channels": config.BIPOLAR_NAMES, "features": "feature_names.json",
+               "normalization": "per_user_robust", "smoothing_windows": SMOOTH_W}
+        out = {"type": "binary", "classes": ["seizure_suspect"], "operating_points": ops,
+               "thresholds": {"review": thr.get(0.05), "suspect": thr.get(0.01, h.get("threshold_at_1pct_fpr"))}}
+        data = {"datasets": ["CHB-MIT"] + (["Siena (external test)"] if getattr(a, "siena", None) else []),
+                "subjects": metrics.get("subjects"), "n_windows": metrics.get("n_windows")}
+    elif task == "sleep":
+        inp = {"kind": "features", "modality": "eeg", "fs_hz": config.FS_TARGET, "window_s": config.SLEEP_EPOCH_S,
+               "channels": ["Fpz-Cz", "Pz-Oz"], "context_epochs": [-1, 0, 1], "features": "feature_names.json"}
+        out = {"type": "multiclass", "classes": ["W", "N1", "N2", "N3", "REM"]}
+        data = {"datasets": ["Sleep-EDFx sleep-cassette"], "subjects": metrics.get("subjects"),
+                "n_epochs": metrics.get("n_epochs")}
+    else:
+        from .data import LEADS, SUPER
+        inp = {"kind": "features", "modality": "ecg", "fs_hz": 100.0, "window_s": 10.0, "leads": LEADS,
+               "features": "feature_names.json"}
+        out = {"type": "multilabel", "classes": SUPER, "estimator": "dict of one-vs-rest binary classifiers"}
+        data = {"datasets": ["PTB-XL 1.0.3"], "split": metrics.get("split"), "n_train": metrics.get("n_train")}
+    if getattr(a, "smoke", False):
+        data["smoke"] = True
+    return inp, out, data
+
+
+def _write(out: Path, task: str, metrics: dict, model, cols: list[str], a=None) -> None:
     import joblib
+    from ..models.export import headline_from_metrics, write_manifest
     d = out / task
     d.mkdir(parents=True, exist_ok=True)
     (d / "metrics.json").write_text(json.dumps(metrics, indent=2, default=float))
     (d / "feature_names.json").write_text(json.dumps(cols))
     joblib.dump(model, d / "model.joblib")     # our own artifact; never load a joblib file you did not build
+    inp, outspec, data = _specs(task, metrics, a)
+    # every run leaves a servable folder; without --model-id it stays UNASSIGNED (listed, not served)
+    write_manifest(d, task=task, input_spec=inp, output_spec=outspec, data=data,
+                   model_id=getattr(a, "model_id", None), status="draft",
+                   headline=headline_from_metrics(task, json.loads(json.dumps(metrics, default=float))))
 
 
 # ---------------- seizure ----------------
@@ -183,7 +221,7 @@ def run_seizure(a) -> dict:
                      "false-positive windows per hour counts overlapping windows, not alarms",
                      "seizure-free files are subsampled per subject, so absolute false-alarm rates are optimistic or noisy",
                      "small number of subjects; intervals are wide"]
-    _write(out, "seizure", res, final, cols)
+    _write(out, "seizure", res, final, cols, a)
     return res
 
 
@@ -220,7 +258,7 @@ def run_sleep(a) -> dict:
     res["limits"] = ["few subjects (healthy sleep-cassette recordings, ages 25-101 in the dataset)",
                      "single dataset, no external validation", "two EEG channels only; wearable headbands differ"]
     final = fit(make_hgb(), X, y)
-    _write(out, "sleep", res, final, cols)
+    _write(out, "sleep", res, final, cols, a)
     return res
 
 
@@ -266,7 +304,7 @@ def run_ecg(a) -> dict:
     res["limits"] = ["hand-built spectral features, no beat-level morphology; published deep models do better",
                      "labels are PTB-XL cardiologist annotations (diagnostic superclasses), single-site data",
                      "12-lead hospital ECG, not single-lead wearable"]
-    _write(out, "ecg", res, final, cols)
+    _write(out, "ecg", res, final, cols, a)
     return res
 
 
@@ -276,6 +314,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--chb"); p.add_argument("--siena"); p.add_argument("--sleep"); p.add_argument("--ptbxl")
     p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--model-id", help="EVA-<n> from MODEL_REGISTRY.md for manifest.json (a retrain is a new ID); omitted: UNASSIGNED")
     p.add_argument("--max-free", type=int, default=3, help="seizure-free files kept per subject (seizure task)")
     p.add_argument("--smoke", action="store_true", help="tiny run to check the pipeline end to end")
     a = p.parse_args(argv)
