@@ -7,14 +7,14 @@ import pytest
 
 pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
-os.environ["EVADE_API_TOKEN"] = "test-token"
 os.environ.pop("EVADE_MODEL_DIR", None)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from evade.api.app import app  # noqa: E402
+from tests.conftest import KEY_HEADER  # noqa: E402
 
-H = {"Authorization": "Bearer test-token"}
+H = KEY_HEADER
 C = TestClient(app)
 NOW = datetime.now(timezone.utc).isoformat()
 
@@ -34,14 +34,15 @@ def new_user():
     return r.json()["data"]["user_id"]
 
 
-def test_health_open_and_auth_required():
-    assert C.get("/v1/health").status_code == 200
+def test_key_required_everywhere():
+    assert C.get("/v1/health", headers=H).status_code == 200
+    assert C.get("/v1/health").status_code == 401
     assert C.post("/v1/users", json={"consent": True}).status_code == 401
-    assert C.post("/v1/users", json={"consent": True}, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert C.post("/v1/users", json={"consent": True}, headers={"X-EVAde-Key": "wrong"}).status_code == 401
 
 
 def test_unknown_user_404():
-    r = C.post("/v1/predict/ecg", json={"user_id": "nope", "window": ecg_window()}, headers=H)
+    r = C.post("/v1/predict/ecg", json={"user_id": "00000000-0000-4000-8000-000000000000", "window": ecg_window()}, headers=H)
     assert r.status_code == 404 and r.json()["error"]["code"] == "user_not_found"
 
 

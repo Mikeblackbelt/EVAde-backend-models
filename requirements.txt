@@ -10,3 +10,7 @@ joblib
 fastapi
 uvicorn
 httpx
+# Optional, install only what the deployment uses:
+#   boto3        R2 blob storage (EVADE_STORAGE=cloudflare with CF_R2_*) and scripts/fetch_models.py
+#   onnxruntime  serve model folders with format=onnx
+#   torch        serve model folders with format=torchscript

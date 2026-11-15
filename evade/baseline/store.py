@@ -1,6 +1,6 @@
 """Per-user baselines and baseline-vs-current comparison (lit review/planning/baseline-comparison.md).
 
-In-memory store for the hackathon beta (state is lost on restart; a database replaces it later).
+In-memory working copy; with EVADE_STORAGE=cloudflare it is written through to D1 (evade.storage).
 Robust statistics: center = median, spread = 1.4826 x MAD floored at 15% of |center|; skewed metrics are
 log-transformed; only deviation in each metric's bad direction counts toward the level and component score.
 """
@@ -13,6 +13,8 @@ import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from ..storage.base import StorageError, mark_storage_call
 
 # minimum observations before a baseline locks (standard, demo) per modality
 N_NEEDED = {"ecg": (24, 30), "ppg": (24, 30), "eeg": (60, 30), "vitals": (20, 10), "sleep": (7, 3),
@@ -71,6 +73,18 @@ class Baseline:
         self.center, self.spread = c, max(mad, floor, 1e-6)
         self.status = "provisional"
 
+    def record(self) -> dict:
+        """Storage form (evade.storage put_baselines / get_baselines)."""
+        return {"user_id": self.user_id, "modality": self.modality, "metric": self.metric, "baseline_id": self.baseline_id,
+                "mode": self.mode, "phase": self.phase, "status": self.status, "values": list(self.values),
+                "center": self.center, "spread": self.spread, "created": self.created}
+
+    @classmethod
+    def from_record(cls, r: dict) -> "Baseline":
+        return cls(r["baseline_id"], r["user_id"], r["modality"], r["metric"], r.get("mode") or "demo",
+                   r.get("phase") or "demo", r["status"], list(r.get("values") or []), r.get("center"), r.get("spread"),
+                   r.get("created") or time.time())
+
     def public(self) -> dict:
         return {"baseline_id": self.baseline_id, "modality": self.modality, "metric": self.metric, "status": self.status,
                 "phase": self.phase, "mode": self.mode, "n": len(self.values), "n_needed": self.n_needed(),
@@ -78,11 +92,51 @@ class Baseline:
 
 
 class BaselineStore:
-    def __init__(self):
+    """Working copy in memory; with a storage backend, changed baselines are written by flush() (one batched
+    write per request, outside the lock) and reset() archives them in storage too."""
+
+    def __init__(self, storage=None):
         self._b: dict[tuple, Baseline] = {}
         self._archive: list[Baseline] = []
         self._lock = threading.Lock()
         self._deleted: set[str] = set()     # tombstones: never recreate data for a deleted user
+        self._storage = storage
+        self._dirty: set[tuple] = set()
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self._dirty)
+
+    def _mark(self, key: tuple) -> None:
+        """Mark a baseline for the next flush (caller holds the lock). Counts as storage work for this request, so
+        the request's middleware flushes it even if the request made no network call itself."""
+        self._dirty.add(key)
+        mark_storage_call()
+
+    def flush(self) -> int:
+        """Write changed baselines to storage. On failure they stay marked and the error propagates."""
+        if self._storage is None:
+            self._dirty.clear()
+            return 0
+        with self._lock:
+            keys, self._dirty = self._dirty, set()
+            recs = [self._b[k].record() for k in keys if k in self._b and k[0] not in self._deleted]
+        try:
+            if recs:
+                self._storage.put_baselines(recs)
+        except Exception:
+            with self._lock:
+                self._dirty |= keys
+            raise
+        return len(recs)
+
+    def load(self, records: list[dict]) -> None:
+        """Hydrate one user's baselines from storage (existing in-memory entries win)."""
+        with self._lock:
+            for r in records:
+                k = (r["user_id"], r["modality"], r["metric"])
+                if r["user_id"] not in self._deleted and k not in self._b:
+                    self._b[k] = Baseline.from_record(r)
 
     def _get(self, user_id: str, modality: str, metric: str, mode: str = "demo", phase: str = "demo") -> Baseline:
         k = (user_id, modality, metric)
@@ -102,6 +156,7 @@ class BaselineStore:
                 b.values.append(float(value))
                 if len(b.values) >= b.n_needed():
                     b.lock()
+                self._mark((user_id, modality, metric))
             return b
 
     def compare(self, user_id: str, modality: str, metric: str, value: float | None, *, quality: float = 1.0,
@@ -124,6 +179,7 @@ class BaselineStore:
             # slow update only while green, so the baseline follows adaptation without absorbing a decline
             if lvl == "green" and b.status == "confirmed":
                 b.center = (1 - EW_ALPHA) * b.center + EW_ALPHA * _t(metric, value)
+                self._mark((user_id, modality, metric))
             conf = "ok" if b.status == "confirmed" else ("demo" if b.mode == "demo" else "provisional")
             return {**out, "baseline_id": b.baseline_id, "baseline_status": b.status, "baseline_center": round(center_raw, 4),
                     "baseline_spread": round(b.spread, 4), "n_baseline": len(b.values), "z": round(z, 3),
@@ -137,16 +193,43 @@ class BaselineStore:
             for (u, m, _), b in self._b.items():
                 if u == user_id and m == modality and b.status == "provisional":
                     b.status, n = "confirmed", n + 1
+                    self._mark((u, m, _))
             return n
 
     def reset(self, user_id: str, modality: str, phase: str = "demo") -> int:
+        """Archive in storage first (a failure leaves memory untouched, so a retry archives the same baselines), then
+        in memory. Storage archives exactly the snapshot's baseline_ids, in-memory records included, so a flush that
+        took its snapshot before the reset cannot write them back, and a baseline created after the snapshot stays.
+        A transient archive failure is retried once (the statements are idempotent); a second failure raises, memory
+        stays as it was, and the client's retry archives the same baselines.
+
+        Known limit: a submit for one of these metrics that lands while the archive call is in flight adds to the old
+        baseline, which is then archived, so that submit's values go to the archive with it."""
         with self._lock:
-            keys = [k for k in self._b if k[0] == user_id and k[1] == modality]
-            for k in keys:
-                b = self._b.pop(k)
-                b.status = "archived"
-                self._archive.append(b)
-            return len(keys)
+            snap = {k: b.baseline_id for k, b in self._b.items() if k[0] == user_id and k[1] == modality}
+            recs = [self._b[k].record() for k in snap]
+        if self._storage is not None and snap:
+            try:
+                self._storage.archive_baselines(user_id, modality, recs)
+            except StorageError as e:
+                if not getattr(e, "transient", True):
+                    raise
+                # the archive statements are idempotent (insert-or-ignore, copy, delete by id): retry once, so a call
+                # that committed only part of its batches finishes; if it still fails, memory is untouched and the
+                # 503 makes the client retry. (Settling from the archive table alone could report success while
+                # the live rows were never deleted.)
+                self._storage.archive_baselines(user_id, modality, recs)
+        with self._lock:
+            n = 0
+            for k, bid in snap.items():
+                b = self._b.get(k)
+                if b is not None and b.baseline_id == bid:
+                    del self._b[k]
+                    b.status = "archived"
+                    self._archive.append(b)
+                    self._dirty.discard(k)
+                    n += 1
+            return n
 
     def for_user(self, user_id: str) -> list[dict]:
         with self._lock:
@@ -157,6 +240,7 @@ class BaselineStore:
             self._deleted.add(user_id)
             for k in [k for k in self._b if k[0] == user_id]:
                 del self._b[k]
+            self._dirty = {k for k in self._dirty if k[0] != user_id}
             self._archive = [b for b in self._archive if b.user_id != user_id]
 
 
