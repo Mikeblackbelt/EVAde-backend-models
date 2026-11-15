@@ -2,7 +2,7 @@
 
 Every retained model architecture and trained model in this repository gets a unique identifier of the form **`EVA-[n]`**, where `n` is a positive integer assigned in order of creation. This file is the single source of truth.
 
-**Next free ID: EVA-13**
+**Next free ID: EVA-14**
 
 ## Rules
 
@@ -38,6 +38,9 @@ Every retained model architecture and trained model in this repository gets a un
 | EVA-10 | arch | spe-onset-24h-cme | - | radiation | EVA-7 features plus 3 CME features (fastest CME speed in 72 h, wide-CME flag, fastest wide CME); CDAW catalogue in training, NASA DONKI when serving | 2026-11-15 | 1fa7ec7 | - | - | - | - | draft | [spaceweather README](evade/spaceweather/README.md) |
 | EVA-11 | model | spe-onset-24h-cme logistic | EVA-10 | radiation | SPE onset within 24 h (hourly); not served, weights not retained (rerun train.py to rebuild) | 2026-11-15 | 1fa7ec7 | as EVA-9 plus SOHO/LASCO CDAW CME catalogue (3 h availability lag) | as EVA-9 | as EVA-9; 27-day block bootstrap of the difference vs EVA-9 | test Brier 0.0117, AUROC 0.892; GOES-R era AUROC +0.005 vs EVA-9 (95% CI +0.0001 to +0.012), Brier difference CI includes 0 | draft | [spaceweather README](evade/spaceweather/README.md) |
 | EVA-12 | model | spe-onset-24h logistic v2 (GOES-R, no background correction) | EVA-7 | radiation | SPE onset within 24 h (hourly); served | 2026-11-15 | 302a584 | as EVA-9 (GOES-8..15 1998-2020-03 + GOES-16/18 2020-11..2026-11), no background correction | as EVA-9 | as EVA-9 | test Brier 0.0113, AUROC 0.892 (persistence 0.0117 / 0.763); GOES-R era (37 onsets) Brier 0.0165, AUROC 0.836 (persistence 0.0169 / 0.741) | draft | [spaceweather README](evade/spaceweather/README.md) |
+| EVA-13 | model | ptbxl-superclass resnet1d_wang (deep ECG, served as `ecg_deep`) | - (resnet1d_wang from evade/training/deep/models.py; arch not numbered separately) | ECG | 5 diagnostic superclasses, 12-lead 10 s at 100 Hz; ONNX, 2 MB; served by `/v1/predict/ecg-deep` | 2026-11-15 | 853ad95 (training code; the run's commit is in its manifest `code_commit`) | PTB-XL 1.0.3 superclass labels | official strat_fold: train 1-8, val 9 (selection), test 10 (scored once) | macro AUROC, patient bootstrap (1000 resamples); beta EVA-6 as the comparison baseline | test 0.927 (0.920-0.934) vs beta EVA-6 0.867 (0.858-0.878); trained on the CUNY HPCC cluster | draft | [deep training README](evade/training/README.md) |
+
+<!-- Deep ECG note: the larger xresnet1d101 on the same split scored test macro AUROC 0.933 (0.926-0.940). It is not the served default (EVA-13 is: 2 MB ONNX, CI overlaps) and has no ID; give it the next free ID before it is served or cited in a result table (rule 7). -->
 
 ## Entry template
 
