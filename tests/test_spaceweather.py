@@ -62,8 +62,11 @@ def fake_swpc(fail=()):
         "xrays": [{"time_tag": iso(t2), "satellite": 18, "flux": 2.3e-6, "energy": "0.1-0.8nm"},
                   {"time_tag": iso(t2), "satellite": 18, "flux": 1e-7, "energy": "0.05-0.4nm"}],
         "k-index": [["time_tag", "Kp", "a_running", "station_count"], [t2.strftime("%Y-%m-%d %H:%M:%S.000"), "5.33", "56", "8"]],
-        "plasma": [["time_tag", "density", "speed", "temperature"], [t2.strftime("%Y-%m-%d %H:%M:%S.000"), "4.1", "512.3", "1e5"]],
-        "mag": [{"time_tag": t2.strftime("%Y-%m-%d %H:%M:%S.000"), "bx_gsm": "1", "by_gsm": "2", "bz_gsm": "-7.5"}],
+        "rtsw_wind": [{"time_tag": t2.strftime("%Y-%m-%dT%H:%M:%S"), "active": True, "source": "SOLAR1",
+                       "proton_speed": 512.3, "proton_density": 4.1},
+                      {"time_tag": t2.strftime("%Y-%m-%dT%H:%M:%S"), "active": False, "source": "ACE",
+                       "proton_speed": 999.0, "proton_density": 99.0}],
+        "rtsw_mag": [{"time_tag": t2.strftime("%Y-%m-%dT%H:%M:%S"), "active": True, "bx_gsm": 1, "by_gsm": 2, "bz_gsm": -7.5}],
     }
     calls = []
 

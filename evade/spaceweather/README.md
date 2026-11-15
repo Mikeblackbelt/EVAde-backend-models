@@ -50,7 +50,7 @@ Then add `"my_api"` to the `provider` allow-list in `evade/api/schemas.py` (`Spa
 ## NOAA SWPC reference provider
 
 `noaa_swpc` reads `services.swpc.noaa.gov` (public, no key; only that host is allowed, https only, 8 s timeout per feed, 8 MB cap):
-`/json/goes/primary/integral-protons-3-day.json`, `/json/goes/primary/xrays-3-day.json`, `/products/noaa-planetary-k-index.json`, `/products/solar-wind/plasma-3-day.json`, `/products/solar-wind/mag-3-day.json`. Both SWPC payload styles (a list of objects, or a list of lists with a header row) are parsed. A missing proton feed means `provider_unavailable` (HTTP 503). Missing X-ray, Kp or solar wind feeds become warnings. Results are cached for 5 minutes and failures for 1 minute, with one fetch at a time, so NOAA is called at most about 5 times per 5 minutes whatever the request rate. NASA DONKI is not used.
+`/json/goes/primary/integral-protons-3-day.json`, `/json/goes/primary/xrays-3-day.json`, `/products/noaa-planetary-k-index.json`, `/json/rtsw/rtsw_wind_1m.json` and `/json/rtsw/rtsw_mag_1m.json` (real-time solar wind, active spacecraft only; the older `/products/solar-wind/*` files returned 404 on 2026-11-15). Live check 2026-11-15: protons (GOES-18), X-rays and Kp parsed, 49 h of forecast coverage, `p_onset_24h` 0.008 on a quiet day. Both SWPC payload styles (a list of objects, or a list of lists with a header row) are parsed. A missing proton feed means `provider_unavailable` (HTTP 503). Missing X-ray, Kp or solar wind feeds become warnings. Results are cached for 5 minutes and failures for 1 minute, with one fetch at a time, so NOAA is called at most about 5 times per 5 minutes whatever the request rate. NASA DONKI is not used.
 
 `replay` (only when `EVADE_SPACEWX_REPLAY_FILE` is set) replays a normalized JSON file (`{"source": ..., "records": [{"t_utc": ..., <fields>}]}`), shifted so the last record is "now".
 
@@ -67,7 +67,28 @@ NOAA scales (standard thresholds): S1-S5 at >=10 MeV flux 10, 100, 1e3, 1e4, 1e5
 - **Features (19, `features.py`, the same code for training and serving):** log flux at >=10/50/100 MeV, 24 h max and 48 h min of log >=10 MeV flux, its 1/3/6 h changes, spectral hardness (50/10, 100/10), log X-ray flux now and its max over 3/6/24/48 h, 24 h X-ray fluence, counts of M- and X-class hours in 48 h, hours since the last M-class hour (capped at 48). A test checks that features from a 22-year history and from the trailing 49 hours are identical.
 - **Splits (no leakage across storms):** protocol A, time-forward: train 1998-2010, Platt recalibration 2011-2012, test 2013-2019, with a 72 h embargo (48 h lookback + 24 h horizon) at every boundary. Logistic vs gradient boosting was chosen by blocked CV inside 1998-2012 only. Protocol B: leave-one-block-out over 9 contiguous blocks with the same embargo (robustness). Baselines: climatology (the training base rate) and persistence (logistic on the current log flux only). CIs come from a 27-day block bootstrap.
 
-RESULTS_PLACEHOLDER
+### Results (2026-11-14, commit a99b862, draft)
+
+Data: 192,840 hourly rows (1998-2019, 264 months; >=10 MeV valid 98.0%, X-ray 96.4%), 184,180 eligible quiet hours, 2,630 positive hours, 100 independent onsets (S1 crossings after at least 24 h below). Logistic regression beat gradient boosting in blocked CV inside 1998-2012 (Brier 0.0152 vs 0.0162, AUROC 0.901 vs 0.872), so it was chosen. Training took 27 s on 4 CPU threads.
+
+**Protocol A, held-out test 2013-2019** (60,288 quiet hours, 396 positive, **15 independent onsets**; 95% CIs from a 27-day block bootstrap):
+
+| Model | Brier (95% CI) | BSS vs training climatology | AUROC (95% CI) | AP |
+|---|---|---|---|---|
+| EVA-8 (logistic + Platt) | 0.00594 (0.00332-0.00895) | 0.102 (-0.097 to 0.201) | 0.918 (0.870-0.952) | 0.229 |
+| EVA-8 before Platt step | 0.00575 | 0.131 | 0.918 | 0.229 |
+| Persistence (current log flux only) | 0.00642 (0.00322-0.01014) | 0.031 | 0.714 (0.564-0.817) | 0.142 |
+| Climatology (training base rate 1.63%) | 0.00662 | 0 | 0.5 | 0.007 |
+
+Brier difference, model minus persistence: 95% CI -0.00127 to +0.00032. Against the test period's own base rate (0.66%, an oracle climatology with Brier 0.00653), the model's BSS is about 0.09.
+
+Operating points on the test period: at p >= 0.25, 25% of positive hours are flagged, precision is 0.33, there are 0.08 false-alarm hours per quiet day, and all 15 onsets had at least one hour >= 0.25 in the 24 h before. At p >= 0.5: precision 0.60, 0.015 false-alarm hours per quiet day, 12 of 15 onsets. Persistence at 0.25 warns 11 of 15 with precision 0.20.
+
+Reliability (test): the model **over-forecasts by about 2x** in the 0.01-0.5 range (for example, mean p 0.137 vs observed 0.059 in the 0.1-0.2 bin; 0.38 vs 0.22 in 0.3-0.5) and is close above 0.7 (0.81 vs 0.84, n = 32). Solar cycle 24 (test) was much weaker than cycle 23 (most of training), and the Platt step fitted on the active 2011-2012 period pushed probabilities up (a = 0.94, b = 0.19), which made the test Brier slightly worse. Both were fixed in advance and are reported, not re-tuned on the test set.
+
+**Protocol B, leave-one-block-out over 9 blocks (1998-2019, pooled out-of-fold):** model Brier 0.0121, AUROC 0.909; persistence 0.0128 and 0.715; per-fold climatology 0.0141.
+
+Honest reading: discrimination is clearly better than persistence (AUROC 0.92 vs 0.71, CIs barely overlap). The Brier gain over persistence and climatology is small and its CI includes zero, because there are only 15 test onsets. Probabilities are too high in a quiet solar cycle. Use the output as a ranked "watch" signal for human review, not as a calibrated probability.
 
 ## (c) Crew dose-rate estimate
 
@@ -99,7 +120,7 @@ python -I -c "import sys; sys.path.insert(0, '<code dir>'); from evade.spaceweat
        --raw ~/evade_data/other/spaceweather/raw --out <model_dir> [--smoke]
 ```
 
-On the shared server, run it through `guarded_job.sh` (4 threads, 8 GB and 1 h are plenty; the full run takes LIMITS_RUNTIME).
+On the shared server, run it through `guarded_job.sh` (4 threads, 8 GB and 1 h are plenty; the full run took about 30 s and stayed inside an 8 GB guard limit).
 
 ## Limits
 

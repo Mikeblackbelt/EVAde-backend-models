@@ -2,7 +2,7 @@
 
 Every retained model architecture and trained model in this repository gets a unique identifier of the form **`EVA-[n]`**, where `n` is a positive integer assigned in order of creation. This file is the single source of truth.
 
-**Next free ID: EVA-7**
+**Next free ID: EVA-9**
 
 ## Rules
 
@@ -32,6 +32,8 @@ Every retained model architecture and trained model in this repository gets a un
 | EVA-4 | model | sleep-stage-hgb beta | EVA-3 | EEG | 5-class sleep staging per 30 s epoch | 2026-11-14 | c98e542 | Sleep-EDFx SC400-SC404 (b99fb35a) | leave-one-subject-out, 5 subjects | accuracy, macro F1, Cohen's kappa | subject kappa 0.669 (0.545-0.785); logistic baseline 0.683 | draft | [training README](evade/training/README.md) |
 | EVA-5 | arch | ptbxl-superclass-hgb | - | ECG | 5 diagnostic superclasses, 12-lead 10 s | 2026-11-14 | c98e542 | - | - | - | - | draft | [training README](evade/training/README.md) |
 | EVA-6 | model | ptbxl-superclass-hgb beta | EVA-5 | ECG | 5 diagnostic superclasses, 12-lead 10 s | 2026-11-14 | c98e542 | PTB-XL 1.0.3 (f52b3af6) | official strat_fold: train 1-8, test 10 | macro AUROC, patient bootstrap | 0.867 (0.858-0.878) | draft | [training README](evade/training/README.md) |
+| EVA-7 | arch | spe-onset-24h | - | radiation | P(>=10 MeV protons reach 10 pfu within 24 h), quiet hours only; 19 GOES proton and X-ray history features (48 h lookback); logistic or gradient boosting chosen by blocked CV, Platt step | 2026-11-14 | a99b862 | - | - | - | - | draft | [spaceweather README](evade/spaceweather/README.md) |
+| EVA-8 | model | spe-onset-24h logistic beta | EVA-7 | radiation | SPE onset within 24 h (hourly) | 2026-11-14 | a99b862 | NOAA NCEI GOES-8..15 SEM 5-min averages 1998-2019, XRS unscaled /0.7 (hourly table hash 7998390607791038415) | time-forward: train 1998-2010, Platt 2011-2012, test 2013-2019, 72 h embargo; also 9-block leave-one-block-out | Brier, BSS, AUROC, reliability; 27-day block bootstrap; persistence and climatology baselines | test Brier 0.00594 (0.00332-0.00895), AUROC 0.918 (0.870-0.952) vs persistence 0.714; 15 test onsets; over-forecasts about 2x | draft | [spaceweather README](evade/spaceweather/README.md) |
 
 ## Entry template
 

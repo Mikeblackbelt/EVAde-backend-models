@@ -134,14 +134,16 @@ class NoaaSwpcProvider(SpaceWeatherProvider):
         else:
             warn.append("Kp feed unavailable")
 
-        sw_span = "1-day" if hours <= 24 else "3-day" if hours <= 72 else "7-day"
-        plasma = get("plasma", f"/products/solar-wind/plasma-{sw_span}.json")
+        # real-time solar wind (DSCOVR/ACE/SWFO, 1-min); several spacecraft per timestamp, keep the active one
+        active = lambda r: r.get("active", True) in (True, "true", 1)
+        plasma = get("plasma", "/json/rtsw/rtsw_wind_1m.json")
         for r in plasma or []:
-            if r.get("time_tag"):
-                recs.append(Record.make(r["time_tag"], sw_speed_kms=r.get("speed"), sw_density_cm3=r.get("density")))
-        mag = get("mag", f"/products/solar-wind/mag-{sw_span}.json")
+            if r.get("time_tag") and active(r):
+                recs.append(Record.make(r["time_tag"], sw_speed_kms=_first(r, "proton_speed", "speed"),
+                                        sw_density_cm3=_first(r, "proton_density", "density")))
+        mag = get("mag", "/json/rtsw/rtsw_mag_1m.json")
         for r in mag or []:
-            if r.get("time_tag"):
+            if r.get("time_tag") and active(r):
                 recs.append(Record.make(r["time_tag"], bz_gsm_nt=r.get("bz_gsm")))
         if not plasma or not mag:
             warn.append("solar wind feed unavailable")
