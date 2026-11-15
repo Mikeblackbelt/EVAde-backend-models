@@ -73,16 +73,25 @@ class MemoryBackend(Storage):
             return [copy.deepcopy(r) for k, r in self.baselines.items() if k[0] == user_id]
 
     def _archive_baselines(self, user_id, modality, records):
+        """Archive exactly the given baselines (by baseline_id), or every stored one of the modality if records is
+        None: a baseline created after the caller's snapshot is left alone."""
         with self._lock:
             now = time.time()
-            done = {b["baseline_id"] for b in self.archive}
-            mem = {r["baseline_id"]: r for r in records}
-            for k in [k for k in self.baselines if k[0] == user_id and k[1] == modality]:
-                b = self.baselines.pop(k)
-                mem.setdefault(b["baseline_id"], b)
+            done = {b["baseline_id"] for b in self.archive if b["user_id"] == user_id}
+            stored = {k: r for k, r in self.baselines.items() if k[0] == user_id and k[1] == modality}
+            if records is None:
+                records = list(stored.values())
+            mem = {r["baseline_id"]: r for r in records if r.get("modality", modality) == modality}
+            for k in [k for k, r in stored.items() if r["baseline_id"] in mem]:
+                del self.baselines[k]
             for bid, r in mem.items():
                 if bid not in done:
-                    self.archive.append({**copy.deepcopy(r), "status": "archived", "archived_at": now})
+                    self.archive.append({**copy.deepcopy(r), "user_id": user_id, "status": "archived",
+                                         "archived_at": now})
+
+    def _archived_ids(self, user_id, ids):
+        with self._lock:
+            return {b["baseline_id"] for b in self.archive if b["user_id"] == user_id and b["baseline_id"] in ids}
 
     def _put_state(self, user_id, key, value):
         with self._lock:
@@ -123,7 +132,8 @@ class MemoryBackend(Storage):
     def _update_device(self, device_id, rec):
         with self._lock:
             cur = self.devices.get(device_id)
-            if cur is not None and cur["user_id"] == rec["user_id"] and                     (cur.get("last_seq") if cur.get("last_seq") is not None else -1) < rec.get("last_seq", -1):
+            if cur is not None and cur["user_id"] == rec["user_id"] \
+                    and (cur.get("last_seq") if cur.get("last_seq") is not None else -1) < rec.get("last_seq", -1):
                 self.devices[device_id] = copy.deepcopy(rec)
 
     def _get_device(self, device_id):
@@ -159,6 +169,11 @@ class MemoryBackend(Storage):
             for k in ks:
                 del self.blobs[k]
             return len(ks)
+
+    def _delete_keys(self, keys):
+        with self._lock:
+            for k in keys:
+                self.blobs.pop(k, None)
 
 
 class NullBackend(MemoryBackend):

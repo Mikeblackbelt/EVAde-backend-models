@@ -1,6 +1,6 @@
 """Replay a real CHB-MIT recording through a running EVAde API (demo, no clinical meaning).
 
-  EVADE_API_TOKEN=... python scripts/demo_replay.py --api http://127.0.0.1:8000 \
+  EVADE_API_KEY=... python scripts/demo_replay.py --api http://127.0.0.1:8000 \
       --edf ~/evade_data/eeg/chbmit/chb01/chb01_03.edf --seizure 2996 3036
 
 Steps: create a user, send the first --baseline-s seconds as the user's EEG baseline (in 10 s calls to stay
@@ -40,7 +40,7 @@ def main() -> int:
     p.add_argument("--to-s", type=float, default=3100.0)
     p.add_argument("--win-s", type=float, default=10.0, help="seconds per request (512 Hz data: use 8 to stay under 1 MB)")
     a = p.parse_args()
-    h = {"Authorization": f"Bearer {os.environ['EVADE_API_TOKEN']}"}
+    h = {"X-EVAde-Key": os.environ["EVADE_API_KEY"]}
     data, names, fs, _ = read_edf(Path(a.edf).expanduser())
     bip = any('-' in n for n in names)
     x, present = select_bipolar(data, names) if bip else bipolar_from_monopolar(data, names)   # CHB-MIT vs Siena

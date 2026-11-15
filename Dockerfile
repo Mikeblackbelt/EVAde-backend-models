@@ -1,9 +1,11 @@
 # EVAde model service (beta). Models are NOT baked in: mount a folder built by evade.training at /models.
 #   docker build -t evade-api .
-#   docker run -p 8000:8000 -e EVADE_API_TOKEN=... -e EVADE_CORS_ORIGINS=https://<frontend> \
+#   docker run -p 8000:8000 --env-file <file outside the repo with EVADE_API_KEY=...> \
 #              -e EVADE_ALLOW_DRAFT=1 -v /path/to/evade_train_beta:/models:ro evade-api
-# Cloudflare storage: add -e EVADE_STORAGE=cloudflare and the CF_* variables (see evade/api/README.md), passed as
-# runtime secrets (--env-file outside the repo), never baked into the image.
+# EVADE_API_KEY (32+ characters) is required: the service refuses to start without it. On Cloud Run it comes from
+# Secret Manager (--set-secrets), never from the image or the repo (see evade/api/README.md).
+# Cloudflare storage: add -e EVADE_STORAGE=cloudflare and the CF_* variables, also as runtime secrets.
+# --no-access-log: uvicorn's access log has URL paths, which contain user IDs.
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 EVADE_MODEL_DIR=/models
 WORKDIR /app
@@ -16,4 +18,4 @@ COPY evade ./evade
 RUN useradd --create-home --uid 10001 evade
 USER evade
 EXPOSE 8000
-CMD ["uvicorn", "evade.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+CMD ["uvicorn", "evade.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]

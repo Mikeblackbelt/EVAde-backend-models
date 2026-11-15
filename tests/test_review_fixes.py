@@ -3,6 +3,7 @@ credentials: D1 is SQLite behind httpx.MockTransport, R2 is an in-memory S3 doub
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -14,6 +15,7 @@ import httpx  # noqa: E402
 from evade.storage import MemoryBackend, StorageConfigError, StorageError, from_env  # noqa: E402
 from evade.storage.base import storage_deadline, user_hash  # noqa: E402
 from evade.storage.cloudflare import CloudflareBackend, D1Client, D1Error, R2Blobs  # noqa: E402
+from tests.conftest import KEY_HEADER  # noqa: E402
 from tests.fakes import TOKEN, FakeD1, FakeS3  # noqa: E402
 
 USER_TABLES = ("users", "baselines", "baseline_archive", "user_state", "inputs", "flags", "risk_results", "devices")
@@ -37,7 +39,6 @@ def brec(uid, metric="hr_bpm", bid=None, n=3):
 @pytest.fixture()
 def api(monkeypatch):
     pytest.importorskip("fastapi")
-    os.environ.setdefault("EVADE_API_TOKEN", "test-token")
     from fastapi.testclient import TestClient
     from evade.api import app as A
     from evade.baseline.store import BaselineStore
@@ -47,8 +48,7 @@ def api(monkeypatch):
     monkeypatch.setattr(A.STATE, "pending_deletes", set())
     monkeypatch.setattr(A.STATE, "missing", A.MissCache())
     monkeypatch.setattr(A.STATE, "state_dirty", set())
-    h = {"Authorization": f"Bearer {os.environ['EVADE_API_TOKEN']}"}
-    return TestClient(A.app), h, A, st, fake, s3
+    return TestClient(A.app), dict(KEY_HEADER), A, st, fake, s3
 
 
 def restart(A, fake, s3, monkeypatch):
@@ -188,7 +188,11 @@ def test_f3_audit_write_failure_is_not_a_503_so_no_retry_doubles(api):
     r = C.post("/v1/compare", json={"user_id": uid, "readings": readings(1, 95.0)}, headers=H)
     assert r.status_code == 200 and r.json()["warnings"]
     assert (uid, "latest") in A.STATE.state_dirty
-    C.get(f"/v1/users/{uid}/baseline", headers=H)   # the next request's flush rewrites the latest state
+    n = fake.calls
+    C.get(f"/v1/users/{uid}/baseline", headers=H)   # no storage work of its own: no flush, no D1 call
+    assert fake.calls == n and (uid, "latest") in A.STATE.state_dirty
+    # the next request that works with storage flushes the latest state in its own deadline
+    C.post("/v1/predict/risk", json={"user_id": uid, "domain_inputs": {"cardiac": {"s": 0.2}}}, headers=H)
     assert fake.count("user_state", uid) == 1 and not A.STATE.state_dirty
 
 
@@ -293,15 +297,15 @@ def test_f4_outage_fails_fast_and_health_never_waits_on_d1(api):
     uid = new_user(C, H)
     A.STATE.baselines.add(uid, "vitals", "hr_bpm", 60.0)        # dirty: a flush would call D1
     fake.fail_with = [httpx.ConnectTimeout("t")] * 100
-    r = C.get(f"/v1/users/{'0' * 8}-unknown/baseline", headers=H)
+    r = C.get(f"/v1/users/{uuid.uuid4()}/baseline", headers=H)
     assert r.status_code == 503
     for i in range(3):
-        C.get(f"/v1/users/unknown-{i}/baseline", headers=H)
+        C.get(f"/v1/users/{uuid.uuid4()}/baseline", headers=H)
     n = fake.calls
     t0 = time.monotonic()
-    r = C.get("/v1/users/unknown-x/baseline", headers=H)
+    r = C.get(f"/v1/users/{uuid.uuid4()}/baseline", headers=H)
     assert r.status_code == 503 and fake.calls == n and time.monotonic() - t0 < 1.0     # breaker open
-    r = C.get("/v1/health")
+    r = C.get("/v1/health", headers=H)
     assert r.status_code == 200 and fake.calls == n
     import inspect
     assert inspect.iscoroutinefunction(A.health)    # not queued behind a threadpool blocked on D1
@@ -385,7 +389,8 @@ def test_f7_legacy_pin(tmp_path, sk, monkeypatch):
     assert not e.available and e.reason_code == "sha256_mismatch" and e.model is None
     monkeypatch.setenv("EVADE_LEGACY_SHA256_SEIZURE", MF.sha256_file(d / "model.joblib"))
     e = ModelRegistry(tmp_path, allow_draft=True).scan()["seizure"]
-    assert e.available and e.sha256_verified and e.public()["integrity"] == "sha256_verified"
+    # the pin checks the weights, but feature_names.json is read without a hash, so the entry is not verified
+    assert e.available and not e.sha256_verified and e.public()["integrity"] == "unverified"
 
 
 def test_f7_api_marks_legacy_unverified(tmp_path, sk, monkeypatch, api):
@@ -517,8 +522,9 @@ def test_f10_hand_written_manifest_is_up_to_date_on_second_pull(tmp_path, sk):
 def test_f12_unknown_user_misses_are_cached(api):
     C, H, A, st, fake, s3 = api
     n = fake.calls
-    assert C.get("/v1/users/nobody/baseline", headers=H).status_code == 404
-    assert C.get("/v1/users/nobody/baseline", headers=H).status_code == 404
+    nobody = str(uuid.uuid4())
+    assert C.get(f"/v1/users/{nobody}/baseline", headers=H).status_code == 404
+    assert C.get(f"/v1/users/{nobody}/baseline", headers=H).status_code == 404
     assert fake.calls == n + 1
 
 
@@ -532,7 +538,7 @@ def test_f12_hydrated_risk_history_is_bounded_but_keeps_the_7_day_point(api, mon
     restart(A, fake, s3, monkeypatch)
     assert C.get(f"/v1/users/{uid}/baseline", headers=H).status_code == 200
     hist = A.STATE.risk_history[uid]
-    assert len(hist) <= 100 + 168 + 1 and len(hist) < 151 and hist[0] == (pytest.approx(now - 8 * 86400), 0.5)
+    assert len(hist) <= 100 + 170 and len(hist) < 151 and hist[0] == (pytest.approx(now - 8 * 86400), 0.5)
 
 
 def _r7(hist, now):
@@ -546,27 +552,38 @@ def test_f12_bounded_history_still_answers_the_7_day_lookup_later():
     rng = np.random.default_rng(3)
     full = sorted((now - float(s), 0.5) for s in rng.uniform(0, 10 * 86400, 2000))
     b = bound_history(full, 100, now)
-    assert len(b) <= 100 + 168 + 1
+    assert len(b) <= 100 + 170
     for later in (0.0, 3600.0, 2 * 86400.0, 6.9 * 86400):         # the lookup as the bounded points age
         exact, got = _r7(full, now + later), _r7(b, now + later)
         assert got is not None and exact[0] - got[0] <= 3600.0
 
 
-def test_f12_in_memory_history_keeps_the_trend_input(api, monkeypatch):
-    """Over 100 risk calls inside a week must not drop the 7-day trend input (it is bounded on hydrate only)."""
+def test_f12_in_memory_history_is_bounded_and_keeps_the_trend_input(api, monkeypatch):
+    """Many risk calls: the in-memory history stays bounded, and every 7-day trend input matches the one an
+    untrimmed history would give, to within an hour."""
     C, H, A, st, fake, s3 = api
+    monkeypatch.setattr(A, "persist_soft", lambda *a, **k: None)     # memory behaviour only; faster
     uid = new_user(C, H)
-    clock = [time.time() - 8 * 86400]
+    clock = [time.time() - 9 * 86400]
     monkeypatch.setattr(time, "time", lambda: clock[0])
     seen = []
     real = A.mdtr
     monkeypatch.setattr(A, "mdtr", lambda *a, **k: seen.append(k.get("r_7d_ago")) or real(*a, **k))
-    for i in range(151):
-        r = C.post("/v1/predict/risk", json={"user_id": uid, "domain_inputs": {"cardiac": {"s": 0.1 + i / 1000}},
+    shadow, lens, n = [], [], 1200
+    for i in range(n):
+        r = C.post("/v1/predict/risk", json={"user_id": uid, "domain_inputs": {"cardiac": {"s": (i % 97) / 100}},
                                              "logistics_floor_days": 0.5}, headers=H)
         assert r.status_code == 200
-        clock[0] += 8 * 86400 / 150
-    assert seen[-1] is not None and len(A.STATE.risk_history[uid]) == 151
+        exact = _r7(shadow, clock[0])                  # the lookup on the full history, before this call's point
+        got = seen[-1]
+        assert (exact is None) == (got is None), i
+        if exact is not None:
+            match = [t for t, v in shadow if v == got and exact[0] - 3600.0 <= t <= exact[0]]
+            assert match, (i, exact, got)
+        shadow.append((clock[0], A.STATE.risk_history[uid][-1][1]))
+        lens.append(len(A.STATE.risk_history[uid]))
+        clock[0] += 9 * 86400 / n                      # about one call every 11 minutes over 9 days
+    assert max(lens) <= A.RISK_MAX and len(shadow) == n and seen[-1] is not None
 
 
 # ---------------- 13. device last_seq never rewinds ----------------

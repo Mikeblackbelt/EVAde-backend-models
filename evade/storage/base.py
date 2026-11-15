@@ -16,7 +16,9 @@ What is stored (all keyed by the pseudonymous user_id; no names or emails ever r
 delete_user writes a tombstone and a pending-deletion marker first, then removes every row and every blob under the
 user's prefixes, and clears the marker last. The persistent backend enforces the tombstone inside every write
 statement, so a write already in flight when the DELETE commits cannot recreate rows; the in-process set below only
-saves a round trip.
+saves a round trip. R2 has no such guard: a raw-window PUT already in flight when the DELETE lists the prefix can
+land afterwards, so the API re-checks the tombstone after its PUTs and deletes those keys (best effort; a crash
+between the PUT and the re-check can still leave an orphan blob).
 
 Time budget: storage_deadline() sets a per-request deadline (a context variable) that the D1 client honours, so one
 request cannot spend more than that on storage, however many calls it makes.
@@ -35,15 +37,22 @@ STATE_KEYS = ("radiation", "overrides", "latest", "eeg_baseline")
 WEEK_S = 7 * 86400
 
 _DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("evade_storage_deadline", default=None)
+# a mutable holder set by the request middleware; backends append to it on every network call, so the middleware
+# (whose context is a parent of the endpoint's) can tell whether a request touched storage
+_TOUCHED: contextvars.ContextVar[list | None] = contextvars.ContextVar("evade_storage_touched", default=None)
 
 
 @contextlib.contextmanager
-def storage_deadline(seconds: float | None) -> Iterator[None]:
-    """Every storage call inside the block must finish within `seconds` (None: no deadline)."""
+def storage_deadline(seconds: float | None) -> Iterator[list]:
+    """Every storage call inside the block must finish within `seconds` (None: no deadline). Yields a list that
+    gets one entry per backend network call made inside the block (threads started from it included)."""
+    touched: list = []
     tok = _DEADLINE.set(None if seconds is None else time.monotonic() + max(0.0, float(seconds)))
+    tok2 = _TOUCHED.set(touched)
     try:
-        yield
+        yield touched
     finally:
+        _TOUCHED.reset(tok2)
         _DEADLINE.reset(tok)
 
 
@@ -52,8 +61,17 @@ def deadline_remaining() -> float | None:
     return None if d is None else d - time.monotonic()
 
 
+def mark_storage_call() -> None:
+    t = _TOUCHED.get()
+    if t is not None:
+        t.append(1)
+
+
 class StorageError(RuntimeError):
-    """A backend call failed after retries. Messages never contain credentials."""
+    """A backend call failed after retries. Messages never contain credentials, user IDs or submitted values.
+    transient: an outage (timeout, 5xx, deadline, open breaker) rather than a request the backend rejected."""
+
+    transient = True
 
 
 class StorageConfigError(StorageError):
@@ -65,8 +83,9 @@ def user_hash(user_id: str) -> str:
 
 
 def bound_history(hist, keep: int = 100, now: float | None = None) -> list:
-    """Risk history loaded on hydrate, bounded to at most keep + 168 + 1 points: the last `keep` (t, r) points, the
-    newest point of every hour of the last 7 days (they become the 7-day trend input as they age), and the newest
+    """Risk history (hydrated and in memory), bounded to at most keep + 170 points: the last `keep` (t, r) points, the
+    oldest point of every hour of the last 7 days (as they age they answer the 7-day trend lookup: whenever the
+    exact answer exists, a kept point from the same hour exists and is at most an hour older), and the newest
     point at least 7 days old (the trend input now). Sorted by time."""
     now = time.time() if now is None else now
     hist = sorted({(float(t), float(r)) for t, r in hist})
@@ -74,7 +93,7 @@ def bound_history(hist, keep: int = 100, now: float | None = None) -> list:
     hourly: dict[int, tuple] = {}
     for t, r in hist:
         if now - t < WEEK_S:
-            hourly[int(t // 3600)] = (t, r)      # ascending order: the newest point of each hour wins
+            hourly.setdefault(int(t // 3600), (t, r))   # ascending order: the oldest point of each hour
     out |= set(hourly.values())
     old = [x for x in hist if now - x[0] >= WEEK_S]
     if old:
@@ -139,10 +158,11 @@ class Storage:
         return None if self.is_deleted(user_id) else self._get_user(user_id)
 
     def load_user(self, user_id: str, risk_keep: int = 100) -> dict | None:
-        """Everything the API needs to hydrate one user, or None if unknown or tombstoned:
-        {"user", "baselines", "state", "devices", "risk"} with risk bounded by bound_history."""
+        """Everything the API needs to hydrate one user: {"user", "baselines", "state", "devices", "risk"} with risk
+        bounded by bound_history; None if unknown or deleted; {"deletion_incomplete": True} if a deletion started
+        but did not finish (the caller must not cache that as a miss: a retried DELETE has to finish it)."""
         if self.is_deleted(user_id):
-            return None
+            return {"deletion_incomplete": True} if self.deletion_incomplete(user_id) else None
         rec = self._get_user(user_id)
         if rec is None:
             return None
@@ -159,11 +179,18 @@ class Storage:
     def get_baselines(self, user_id: str) -> list[dict]:
         return self._get_baselines(user_id)
 
-    def archive_baselines(self, user_id: str, modality: str, records: list[dict] = ()) -> None:
-        """Move the user's baselines for `modality` to the archive. `records` are the caller's in-memory copies
-        (possibly never stored yet); archiving their baseline_ids also blocks a stale flush from writing them back."""
+    def archive_baselines(self, user_id: str, modality: str, records: list[dict] | None = None) -> None:
+        """Move baselines for `modality` to the archive. With `records` (the caller's in-memory snapshot, possibly
+        never stored yet), exactly those baseline_ids are archived and removed, so a baseline created after the
+        snapshot is left alone; archiving them also blocks a stale flush from writing them back. Without `records`,
+        every stored baseline of the modality is archived."""
         if not self._gate(user_id):
-            self._archive_baselines(user_id, modality, list(records))
+            self._archive_baselines(user_id, modality, None if records is None else list(records))
+
+    def archived_baseline_ids(self, user_id: str, ids) -> set:
+        """Which of these baseline_ids are in the user's archive (used to settle a reset whose outcome is unknown)."""
+        ids = sorted(set(ids))
+        return self._archived_ids(user_id, ids) if ids else set()
 
     # ---- per-user state documents ----
     def put_state(self, user_id: str, key: str, value: Any) -> None:
@@ -190,6 +217,10 @@ class Storage:
         key = f"raw/{user_id}/{window_id}.json"
         self._put_blob(key, payload, "application/json")
         return key
+
+    def delete_blobs(self, keys: list[str]) -> None:
+        if keys and self.has_blobs():
+            self._delete_keys(list(keys))
 
     # ---- flags and risk results ----
     def add_flags(self, user_id: str, flags: list[dict]) -> None:
@@ -255,6 +286,7 @@ class Storage:
     def _put_baselines(self, records): raise NotImplementedError
     def _get_baselines(self, user_id): raise NotImplementedError
     def _archive_baselines(self, user_id, modality, records): raise NotImplementedError
+    def _archived_ids(self, user_id, ids): raise NotImplementedError
     def _put_state(self, user_id, key, value): raise NotImplementedError
     def _get_state(self, user_id): raise NotImplementedError
     def _add_inputs(self, user_id, rows): raise NotImplementedError
@@ -272,3 +304,4 @@ class Storage:
     def _get_blob(self, key): raise StorageConfigError("no blob store configured")
     def _list_blobs(self, prefix): raise StorageConfigError("no blob store configured")
     def _delete_prefix(self, prefix): return 0
+    def _delete_keys(self, keys): return None

@@ -1,20 +1,26 @@
 """EVAde model service (beta). Implements the hackathon-minimum subset of lit review/planning/api-schema.md.
 
-Run:  EVADE_API_TOKEN=... EVADE_MODEL_DIR=~/evade_train_beta EVADE_ALLOW_DRAFT=1 uvicorn evade.api.app:app
+Run:  EVADE_API_KEY=<32+ characters> EVADE_MODEL_DIR=~/evade_train_beta EVADE_ALLOW_DRAFT=1 \
+      uvicorn evade.api.app:app --no-access-log
 Env:
-  EVADE_API_TOKEN      shared bearer token (required; the hackathon uses one shared token plus user_id)
-  EVADE_CORS_ORIGINS   comma-separated allow-list (default: none)
+  EVADE_API_KEY        shared API key, at least 32 characters (required: the service refuses to start without it).
+                       Every request, /v1/health and unknown paths included, must send it in the X-EVAde-Key header.
+  EVADE_ENABLE_DOCS    "1" to serve /docs, /redoc and /openapi.json (still behind the key); off by default
+  EVADE_REQUIRE_HTTPS  "1" to reject requests whose X-Forwarded-Proto is not https (TLS ends at Cloud Run/Cloudflare)
   EVADE_MODEL_DIR      folder of model folders <task>/manifest.json (evade/models/README.md); optional
   EVADE_ALLOW_DRAFT    "1" to serve draft (beta) models; they are labelled draft in every response
   EVADE_STORAGE        memory (default, state lost on restart) or cloudflare (D1 + R2; see evade/storage)
   EVADE_STORAGE_DEADLINE_S  per-request time budget for storage calls (default 8); /v1/health never touches storage
+Backend-to-backend only: no CORS, so browsers cannot call it. Logs never contain request bodies, signal values,
+self-report answers, user IDs or header values; uvicorn's access log (which has URL paths) must be off.
 Outputs are flags for human review, never diagnoses.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
-import secrets
+import re
 import threading
 import time
 import uuid
@@ -23,17 +29,20 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 import numpy as np
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from typing import Annotated
+
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import storage as storage_mod
 from ..baseline.store import BaselineStore, domain_scores
 from ..models.export import headline_from_metrics
 from ..models.registry import ModelRegistry
 from ..storage import StorageError, deadline_s, storage_deadline
+from ..storage.base import bound_history
 from ..preprocessing import PIPELINE_VERSION, config
 from ..preprocessing.ecg import detect_qrs, hrv_features, preprocess_ecg
 from ..preprocessing.eeg import bipolar_from_monopolar, preprocess_eeg, select_bipolar
@@ -45,7 +54,8 @@ from . import schemas as S
 API_VERSION = "0.1.0-beta"
 MAX_BODY = 1_000_000
 MAX_SEQ_JUMP = 100_000
-RISK_KEEP = 100            # risk points loaded per user on hydrate (plus the 7-day trend points, see bound_history)
+RISK_KEEP = 100            # newest risk points kept per user (plus the 7-day trend points, see bound_history)
+RISK_MAX = RISK_KEEP + 7 * 24 + 2   # upper bound of a bounded history: + one point per hour bucket of 7 days + 1
 MISS_TTL_S, MISS_MAX = 60.0, 10_000
 SOFT_WARNING = "stored in this service only: the storage write failed (it is not retried for this request)"
 ACTIONS = {
@@ -61,6 +71,38 @@ ACTIONS = {
 
 
 log = logging.getLogger("evade.api")
+# library loggers stay at WARNING: at DEBUG, botocore logs object keys (which contain user IDs) and request bodies
+for _name in ("botocore", "boto3", "s3transfer", "urllib3", "httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
+API_KEY_ENV, API_KEY_HEADER, API_KEY_MIN_LEN = "EVADE_API_KEY", "x-evade-key", 32
+
+
+def api_key_problem(key: str | None) -> str | None:
+    """Why a configured key is unusable, or None. Never includes the key itself."""
+    if not key:
+        return f"{API_KEY_ENV} is not set"
+    if len(key) < API_KEY_MIN_LEN:
+        return f"{API_KEY_ENV} must be at least {API_KEY_MIN_LEN} characters"
+    return None
+
+
+def require_api_key() -> None:
+    """Called at import: the service refuses to start without a usable key (put it in Secret Manager, not in code)."""
+    problem = api_key_problem(os.environ.get(API_KEY_ENV))
+    if problem:
+        raise RuntimeError(f"refusing to start: {problem}")
+
+
+def key_ok(sent: str | None) -> bool:
+    """Constant-time comparison of the X-EVAde-Key header with EVADE_API_KEY, on the bytes."""
+    key = os.environ.get(API_KEY_ENV)
+    if api_key_problem(key) or sent is None:
+        return False
+    return hmac.compare_digest(sent.encode("utf-8"), key.encode("utf-8"))
+
+
+require_api_key()
 
 
 class MissCache:
@@ -123,61 +165,105 @@ class State:
         self.models = self.registry.served()       # task -> {model, features, metrics, model_id, status, manifest}
 
 
-app = FastAPI(title="EVAde model service", version=API_VERSION,
-              description="Beta. Flags for human review, not diagnoses.")
-_origins = [o.strip() for o in os.environ.get("EVADE_CORS_ORIGINS", "").split(",") if o.strip()]
-if _origins:
-    app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_methods=["GET", "POST", "DELETE"],
-                       allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
+_DOCS = os.environ.get("EVADE_ENABLE_DOCS") == "1"      # off by default; behind the key like every path when on
+app = FastAPI(title="EVAde model service", version=API_VERSION, description="Beta. Flags for human review, not diagnoses.",
+              docs_url="/docs" if _DOCS else None, redoc_url="/redoc" if _DOCS else None,
+              openapi_url="/openapi.json" if _DOCS else None)
 STATE = State()
+
+# path and query parameters get the same patterns as the request bodies
+UserIdPath = Annotated[str, Path(min_length=36, max_length=36, pattern=S.UUID_PATTERN)]
+UserIdQuery = Annotated[str, Query(min_length=36, max_length=36, pattern=S.UUID_PATTERN)]
+DeviceIdPath = Annotated[str, Path(min_length=3, max_length=64, pattern=S.DEVICE_PATTERN)]
 
 
 def err(status: int, code: str, message: str, field: str | None = None) -> HTTPException:
     return HTTPException(status, {"code": code, "message": message, "field": field})
 
 
-@app.exception_handler(HTTPException)
-async def _http_err(request: Request, exc: HTTPException):
-    d = exc.detail if isinstance(exc.detail, dict) else {"code": "error", "message": str(exc.detail)}
-    return JSONResponse({"error": {**d, "request_id": request.state.rid if hasattr(request.state, "rid") else None}},
-                        status_code=exc.status_code)
+def error_response(status: int, code: str, message: str, field: str | None = None) -> JSONResponse:
+    """The one error shape: {"error": {"code", "message", "field"}}. Never contains submitted values."""
+    return JSONResponse({"error": {"code": code, "message": message, "field": field}}, status_code=status)
+
+
+_HTTP_CODES = {401: "unauthenticated", 403: "forbidden", 404: "not_found", 405: "method_not_allowed",
+               413: "payload_too_large"}
+
+
+@app.exception_handler(StarletteHTTPException)     # FastAPI's HTTPException and the router's own 404/405
+async def _http_err(request: Request, exc: StarletteHTTPException):
+    d = exc.detail if isinstance(exc.detail, dict) else {}
+    return error_response(exc.status_code, d.get("code") or _HTTP_CODES.get(exc.status_code, "error"),
+                          d.get("message") or "request failed", d.get("field"))
+
+
+_SAFE_LOC = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,40}$")
+_VALUE_CODES = ("future_timestamp", "nan_in_signal", "bad_shape", "payload_too_large")
+
+
+def _loc(loc) -> str:
+    """Field path of a validation error. Dict keys a client chose are not echoed (pydantic puts them in loc)."""
+    out = [str(x) if isinstance(x, int) or _SAFE_LOC.match(str(x)) else "<key>" for x in loc]
+    return ".".join(out[1:] if out and out[0] in ("body", "query", "path", "header") else out) or None
 
 
 @app.exception_handler(RequestValidationError)
 async def _val_err(request: Request, exc: RequestValidationError):
-    e = exc.errors()[0] if exc.errors() else {}
-    msg = str(e.get("msg", "validation error"))
-    code = next((c for c in ("future_timestamp", "nan_in_signal", "bad_shape", "payload_too_large") if c in msg), "validation_error")
-    return JSONResponse({"error": {"code": code, "message": msg, "field": ".".join(str(x) for x in e.get("loc", []))}},
-                        status_code=413 if code == "payload_too_large" else 422)
+    # pydantic's "input" and "ctx" hold the submitted value: only the message template and the location are used
+    errs = exc.errors()
+    e = errs[0] if errs else {}
+    msg = str(e.get("msg", "validation error")).removeprefix("Value error, ")
+    code = next((c for c in _VALUE_CODES if c in msg), "validation_error")
+    if e.get("type") == "json_invalid":
+        msg = "body is not valid JSON"
+    return error_response(413 if code == "payload_too_large" else 422, code, msg[:200], _loc(e.get("loc", ())))
 
 
 @app.exception_handler(StorageError)
 async def _storage_err(request: Request, exc: StorageError):
-    log.error("storage error: %s", exc)            # backend messages never contain credentials
-    return JSONResponse({"error": {"code": "storage_unavailable", "message": "storage backend unavailable; retry",
-                                   "request_id": getattr(request.state, "rid", None)}}, status_code=503)
+    # backend messages never contain credentials, user IDs or submitted values
+    log.error("storage error (request %s): %s", getattr(request.state, "rid", "-"), exc)
+    return error_response(503, "storage_unavailable", "storage backend unavailable; retry")
+
+
+def _https_ok(request: Request) -> bool:
+    if os.environ.get("EVADE_REQUIRE_HTTPS") != "1":
+        return True
+    proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return proto != "http"
 
 
 @app.middleware("http")
 async def _mw(request: Request, call_next):
-    request.state.rid = uuid.uuid4().hex[:12]
+    """Runs for every path, matched or not, before any route: HTTPS check, API key, size limits, then one storage
+    deadline for the endpoint and the flush after it."""
+    rid = request.state.rid = uuid.uuid4().hex[:12]
+    if not _https_ok(request):
+        return error_response(403, "https_required", "use HTTPS")
+    if not key_ok(request.headers.get(API_KEY_HEADER)):
+        return error_response(401, "unauthenticated", "missing or invalid X-EVAde-Key header")
     if request.method in ("POST", "PUT", "PATCH"):
         cl = request.headers.get("content-length")
         if cl is None or not cl.isdigit():
             # no chunked uploads: the size cap must be checkable before the body is read
-            return JSONResponse({"error": {"code": "length_required", "message": "Content-Length header required"}}, status_code=411)
+            return error_response(411, "length_required", "Content-Length header required")
         if int(cl) > MAX_BODY:
-            return JSONResponse({"error": {"code": "payload_too_large", "message": "body over 1 MB"}}, status_code=413)
+            return error_response(413, "payload_too_large", "body over 1 MB")
     if request.url.path == "/v1/health":           # never waits on storage
         return await call_next(request)
-    with storage_deadline(deadline_s()):           # one time budget for every storage call of this request
-        resp = await call_next(request)
-    if STATE.baselines.dirty or STATE.state_dirty:   # batched writes after the endpoint, outside every lock
+    with storage_deadline(deadline_s()) as touched:   # one time budget for every storage call of this request
         try:
-            await run_in_threadpool(flush_all)
-        except StorageError as e:                  # kept in memory and marked dirty; the next request retries
-            log.warning("flush failed: %s", e)
+            resp = await call_next(request)
+        except Exception as e:                     # noqa: BLE001 - logged without its message, which may hold values
+            log.error("unhandled %s in request %s", type(e).__name__, rid)
+            return error_response(500, "internal_error", "internal error")
+        # batched writes after the endpoint, outside every lock, inside the same deadline; skipped for requests that
+        # did no storage work (/v1/models, 404s from memory), so they never wait on another request's dirty state
+        if touched and (STATE.baselines.dirty or STATE.state_dirty):
+            try:
+                await run_in_threadpool(flush_all)
+            except StorageError as e:              # kept in memory and marked dirty; the next request retries
+                log.warning("flush failed: %s", e)
     return resp
 
 
@@ -205,19 +291,19 @@ def _write_states(keys) -> None:
 
 
 def flush_all() -> None:
-    """Rewrite failed best-effort state documents (current values), then the changed baselines."""
-    with storage_deadline(deadline_s()):
-        with STATE.lock:
-            pending, STATE.state_dirty = STATE.state_dirty, set()
-        if pending:
-            try:
-                with STATE.storage.buffered():
-                    _write_states(sorted(pending))
-            except StorageError:
-                with STATE.lock:
-                    STATE.state_dirty |= pending
-                raise
-        STATE.baselines.flush()
+    """Rewrite failed best-effort state documents (current values), then the changed baselines. Runs inside the
+    request's own storage deadline (the middleware's), never a second one."""
+    with STATE.lock:
+        pending, STATE.state_dirty = STATE.state_dirty, set()
+    if pending:
+        try:
+            with STATE.storage.buffered():
+                _write_states(sorted(pending))
+        except StorageError:
+            with STATE.lock:
+                STATE.state_dirty |= pending
+            raise
+    STATE.baselines.flush()
 
 
 def persist_soft(user_id: str, warn: list, *, state_keys=(), flags=(), windows=(), readings=(), endpoint: str = "",
@@ -248,14 +334,6 @@ def persist_soft(user_id: str, warn: list, *, state_keys=(), flags=(), windows=(
             warn.append(SOFT_WARNING)
 
 
-def auth(authorization: str | None = Header(None)) -> None:
-    token = os.environ.get("EVADE_API_TOKEN")
-    if not token:
-        raise err(503, "service_not_configured", "EVADE_API_TOKEN is not set")
-    if not authorization or not secrets.compare_digest(authorization, f"Bearer {token}"):
-        raise err(401, "unauthenticated", "missing or invalid token")
-
-
 def user(user_id: str) -> dict:
     u = STATE.users.get(user_id)
     if u is None and STATE.storage.persistent and user_id not in STATE.pending_deletes:
@@ -272,8 +350,17 @@ def hydrate(user_id: str) -> dict | None:
         return None
     st = STATE.storage
     data = st.load_user(user_id, RISK_KEEP)
+    return hydrate_from(user_id, data)
+
+
+def hydrate_from(user_id: str, data: dict | None) -> dict | None:
+    """Install what load_user returned. A miss is cached; a deletion that has not finished is not (a retried DELETE
+    must still find it)."""
+    st = STATE.storage
     if data is None:
         STATE.missing.add(user_id)
+        return None
+    if data.get("deletion_incomplete"):
         return None
     rec, doc, devs = data["user"], data["state"], data["devices"]
     with STATE.lock:
@@ -323,12 +410,21 @@ def input_rows(user_id: str, windows: list, endpoint: str, readings: list = ()) 
     rows = [{"kind": f"reading:{r.modality}", "t_utc": r.t_utc.isoformat(),
              "meta": {"endpoint": endpoint, "metric": r.metric, "value": r.value, "unit": r.unit, "quality": r.quality}}
             for r in readings]
+    keys = []
     for w in windows:
         key = STATE.storage.put_raw_window(user_id, uuid.uuid4().hex, w.model_dump_json().encode()) \
             if STATE.storage.store_raw_windows else None
+        if key:
+            keys.append(key)
         rows.append({"kind": f"window:{w.modality}", "t_utc": w.t0_utc.isoformat(), "blob_key": key,
                      "meta": {"endpoint": endpoint, "fs_hz": w.fs_hz, "channels": len(w.channels),
                               "n_samples": len(w.samples[0]) if w.samples else 0, "source": w.source}})
+    # R2 has no tombstone guard: a DELETE that listed raw/<user_id>/ while these PUTs were in flight missed them.
+    # Its tombstone is written before that listing, so checking it after the PUTs catches the race (best effort: a
+    # crash between the PUT and this check can still leave an orphan blob).
+    if keys and STATE.storage.is_deleted(user_id):
+        STATE.storage.delete_blobs(keys)
+        return []
     return rows
 
 
@@ -434,12 +530,12 @@ def add_eeg_feature_baseline(user_id: str, feats: np.ndarray) -> bool:
 
 # ---------------- endpoints ----------------
 @app.get("/v1/health")
-async def health():                              # async: never queued behind a threadpool busy with storage calls
+async def health():               # async: never queued behind a threadpool busy with storage calls; key required
     return {"status": "ok", "api_version": API_VERSION, "models_loaded": sorted(STATE.models),
             "server_time": datetime.now(timezone.utc).isoformat()}
 
 
-@app.get("/v1/models", dependencies=[Depends(auth)])
+@app.get("/v1/models")
 def models():
     rows = []
     for task, m in STATE.models.items():
@@ -461,24 +557,32 @@ def headline(task: str, m: dict) -> dict:
     return (m.get("manifest") or {}).get("headline") or headline_from_metrics(task, m.get("metrics") or {})
 
 
-@app.post("/v1/users", dependencies=[Depends(auth)])
+@app.post("/v1/users")
 def create_user(body: S.UserCreate):
     uid = str(uuid.uuid4())
     rec = {"created_at": time.time(), "cohort": body.cohort, "age_band": body.age_band, "sex": body.sex}
-    STATE.storage.put_user(uid, rec)             # persisted first: a 503 here leaves no half-created user
+    # persisted first: a 503 here leaves no half-created user in memory. If the row commits but the response is lost,
+    # the client retries and gets a new user; the first row is an orphan nobody holds the ID of, with only created_at
+    # and the coarse attributes above (no health data). Accepted for the beta (see the README).
+    STATE.storage.put_user(uid, rec)
     with STATE.lock:
         STATE.users[uid] = rec
     return envelope(uid, {"user_id": uid, "created_at": datetime.now(timezone.utc).isoformat()})
 
 
-@app.delete("/v1/users/{user_id}", dependencies=[Depends(auth)])
-def delete_user(user_id: str):
+@app.delete("/v1/users/{user_id}")
+def delete_user(user_id: UserIdPath):
     st = STATE.storage
     if user_id not in STATE.pending_deletes and user_id not in STATE.users:
-        # a deletion whose rows were removed but whose blobs were not (R2 failed, then maybe a restart) is finished
-        # by rerunning the idempotent storage delete; a completed deletion gives 404 like any unknown user
-        if not (st.persistent and st.deletion_incomplete(user_id)):
-            user(user_id)                        # 404 unless known here or in storage
+        # unknown here: the miss cache first (misses are cached only when no deletion is pending), then one storage
+        # request. A deletion whose rows were removed but whose blobs were not (R2 failed, then maybe a restart) is
+        # finished by rerunning the idempotent storage delete; a completed deletion gives 404 like any unknown user.
+        if not st.persistent or STATE.missing.hit(user_id):
+            raise err(404, "user_not_found", "unknown user_id", "user_id")
+        data = st.load_user(user_id, RISK_KEEP)
+        if not (data and data.get("deletion_incomplete")) and hydrate_from(user_id, data) is None \
+                and user_id not in STATE.users:
+            raise err(404, "user_not_found", "unknown user_id", "user_id")
     with STATE.lock:
         STATE.baselines.delete_user(user_id)     # tombstone first, so concurrent requests cannot recreate data
         for d in (STATE.users, STATE.latest, STATE.radiation, STATE.overrides, STATE.risk_history, STATE.inputs, STATE.eeg_feats):
@@ -498,7 +602,7 @@ def delete_user(user_id: str):
     return envelope(user_id, {"deleted": True, "storage": STATE.storage.name, "blobs_removed": removed.get("blobs", 0)})
 
 
-@app.post("/v1/baseline/{modality}", dependencies=[Depends(auth)])
+@app.post("/v1/baseline/{modality}")
 def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
     user(body.user_id)
     excluded = {"low_quality": 0, "wrong_modality": 0}
@@ -534,13 +638,13 @@ def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
     return envelope(body.user_id, {"modality": modality, "baselines": rows, "excluded": excluded}, warnings=warn)
 
 
-@app.post("/v1/baseline/{modality}/confirm", dependencies=[Depends(auth)])
+@app.post("/v1/baseline/{modality}/confirm")
 def baseline_confirm(modality: S.Modality, body: S.UserRef):
     user(body.user_id)
     return envelope(body.user_id, {"confirmed": STATE.baselines.confirm(body.user_id, modality)})
 
 
-@app.post("/v1/baseline/{modality}/reset", dependencies=[Depends(auth)])
+@app.post("/v1/baseline/{modality}/reset")
 def baseline_reset(modality: S.Modality, body: S.BaselineReset):
     user(body.user_id)
     if modality == "eeg":
@@ -553,13 +657,13 @@ def baseline_reset(modality: S.Modality, body: S.BaselineReset):
     return envelope(body.user_id, {"archived": archived, "reason": body.reason})
 
 
-@app.get("/v1/users/{user_id}/baseline", dependencies=[Depends(auth)])
-def baseline_get(user_id: str):
+@app.get("/v1/users/{user_id}/baseline")
+def baseline_get(user_id: UserIdPath):
     user(user_id)
     return envelope(user_id, {"baselines": STATE.baselines.for_user(user_id)})
 
 
-@app.post("/v1/compare", dependencies=[Depends(auth)])
+@app.post("/v1/compare")
 def compare(body: S.CompareRequest):
     user(body.user_id)
     comps = []
@@ -577,7 +681,7 @@ def compare(body: S.CompareRequest):
                                    "alerts": alerts_for(comps)}, warnings=warn)
 
 
-@app.post("/v1/predict/ecg", dependencies=[Depends(auth)])
+@app.post("/v1/predict/ecg")
 def predict_ecg(body: S.EcgRequest):
     user(body.user_id)
     w = body.window
@@ -609,7 +713,7 @@ def predict_ecg(body: S.EcgRequest):
     return envelope(body.user_id, data, ids, (["draft model output"] if ids else []) + warn)
 
 
-@app.post("/v1/predict/eeg", dependencies=[Depends(auth)])
+@app.post("/v1/predict/eeg")
 def predict_eeg(body: S.EegRequest):
     user(body.user_id)
     w = body.window
@@ -656,7 +760,7 @@ def predict_eeg(body: S.EegRequest):
     return envelope(body.user_id, data, ids, warn)
 
 
-@app.post("/v1/predict/radiation-risk", dependencies=[Depends(auth)])
+@app.post("/v1/predict/radiation-risk")
 def predict_radiation(body: S.RadiationRequest):
     user(body.user_id)
     di, parts = radiation_domain(body.cumulative_dose_msv, body.spe_dose_msv, body.rate_ratio_to_7d_median, body.seu_count_last_hour)
@@ -680,7 +784,7 @@ def predict_radiation(body: S.RadiationRequest):
                                    "spe_override": o5, "rule_version": "risk-score.md v2"})
 
 
-@app.post("/v1/predict/risk", dependencies=[Depends(auth)])
+@app.post("/v1/predict/risk")
 def predict_risk(body: S.RiskRequest):
     user(body.user_id)
     warn = []
@@ -709,8 +813,13 @@ def predict_risk(body: S.RiskRequest):
     now = time.time()
     provisional = bool(warn)
     with STATE.lock:
-        if body.user_id in STATE.users:          # not trimmed here: the 7-day trend lookup needs the older points
-            STATE.risk_history.setdefault(body.user_id, []).append((now, r.r_mdtr))
+        if body.user_id in STATE.users:
+            # bounded like the hydrated copy: the newest RISK_KEEP points plus the oldest point of every hour of the
+            # last 7 days and the newest older point, which is all the 7-day trend lookup above ever needs
+            hist = STATE.risk_history.setdefault(body.user_id, [])
+            hist.append((now, r.r_mdtr))
+            if len(hist) > RISK_MAX:
+                STATE.risk_history[body.user_id] = [tuple(x) for x in bound_history(hist, RISK_KEEP, now)]
     persist_soft(body.user_id, warn, endpoint="predict/risk",
                  risk=(now, r.r_mdtr, r.band, {"r_agg": r.r_agg, "r_disp": r.r_disp, "flag": r.flag,
                                                "flag_domains": r.flag_domains, "override_ids": r.override_ids,
@@ -724,7 +833,7 @@ def predict_risk(body: S.RiskRequest):
         "note": "decision support for human review; overrides escalate to a clinician and take no action"}, warnings=warn)
 
 
-@app.post("/v1/input/self-report", dependencies=[Depends(auth)])
+@app.post("/v1/input/self-report")
 def self_report(body: S.SelfReport):
     user(body.user_id)
     comps = []
@@ -734,7 +843,8 @@ def self_report(body: S.SelfReport):
         STATE.baselines.add(body.user_id, "behavioral", k, v)
     flags = remember(body.user_id, comps)
     with STATE.lock:
-        STATE.inputs.setdefault(body.user_id, []).append({"type": "self_report", "t": body.t_utc.isoformat()})
+        if body.user_id in STATE.users:          # deleted while this request was running: nothing is put back
+            STATE.inputs.setdefault(body.user_id, []).append({"type": "self_report", "t": body.t_utc.isoformat()})
     warn: list[str] = []
     persist_soft(body.user_id, warn, state_keys=("latest",), flags=flags, endpoint="input/self-report",
                  inputs=[{"kind": "self_report", "t_utc": body.t_utc.isoformat(),
@@ -742,7 +852,7 @@ def self_report(body: S.SelfReport):
     return envelope(body.user_id, {"record_id": uuid.uuid4().hex[:12], "comparison": comps}, warnings=warn)
 
 
-@app.post("/v1/input/instrument", dependencies=[Depends(auth)])
+@app.post("/v1/input/instrument")
 def instrument(body: S.Instrument):
     user(body.user_id)
     score = sum(body.answers)
@@ -752,6 +862,8 @@ def instrument(body: S.Instrument):
     esc = None
     if body.instrument == "phq9" and body.answers[8] > 0:
         with STATE.lock:
+            if body.user_id not in STATE.users:  # deleted while this request was running: nothing is put back
+                raise err(404, "user_not_found", "unknown user_id", "user_id")
             STATE.overrides.setdefault(body.user_id, set()).add("O1")
             ovr = sorted(STATE.overrides[body.user_id])
         STATE.storage.put_state(body.user_id, "overrides", ovr)     # the answers themselves are not stored
@@ -760,18 +872,20 @@ def instrument(body: S.Instrument):
                                    "note": "screening score, not a diagnosis"})
 
 
-@app.get("/v1/actions", dependencies=[Depends(auth)])
-def actions(user_id: str):
+@app.get("/v1/actions")
+def actions(user_id: UserIdQuery):
     user(user_id)
     return envelope(user_id, {"actions": alerts_for(list(STATE.latest.get(user_id, {}).values()))})
 
 
-@app.post("/v1/devices/bind", dependencies=[Depends(auth)])
+@app.post("/v1/devices/bind")
 def bind_device(body: S.DeviceBind):
     user(body.user_id)
     # a binding stored for a user this process has not loaded still counts (deleting a user deletes its bindings)
     stored = STATE.storage.get_device(body.device_id) if STATE.storage.persistent else None
     with STATE.lock:
+        if body.user_id not in STATE.users:      # deleted while this request was running: nothing is put back
+            raise err(404, "user_not_found", "unknown user_id", "user_id")
         prev = STATE.devices.get(body.device_id)
         cur = prev or stored
         if cur and cur["user_id"] != body.user_id and (cur["user_id"] in STATE.users or cur is stored):
@@ -793,8 +907,8 @@ def bind_device(body: S.DeviceBind):
     return envelope(body.user_id, {"device_id": body.device_id, "bound": True})
 
 
-@app.delete("/v1/devices/{device_id}", dependencies=[Depends(auth)])
-def unbind_device(device_id: str, user_id: str):
+@app.delete("/v1/devices/{device_id}")
+def unbind_device(device_id: DeviceIdPath, user_id: UserIdQuery):
     user(user_id)
     st = STATE.storage
     with STATE.lock:
@@ -811,8 +925,8 @@ def unbind_device(device_id: str, user_id: str):
     return envelope(user_id, {"device_id": device_id, "bound": False})
 
 
-@app.get("/v1/devices/{device_id}", dependencies=[Depends(auth)])
-def device_status(device_id: str, user_id: str):
+@app.get("/v1/devices/{device_id}")
+def device_status(device_id: DeviceIdPath, user_id: UserIdQuery):
     user(user_id)
     cur = STATE.devices.get(device_id)
     if not cur or cur["user_id"] != user_id:
@@ -820,7 +934,7 @@ def device_status(device_id: str, user_id: str):
     return envelope(user_id, {"device_id": device_id, **{k: v for k, v in cur.items() if k != "user_id"}})
 
 
-@app.post("/v1/ingest/batch", dependencies=[Depends(auth)])
+@app.post("/v1/ingest/batch")
 def ingest_batch(body: S.IngestBatch):
     user(body.user_id)
     def check():

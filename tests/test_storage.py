@@ -1,7 +1,6 @@
 """Storage layer: memory backend, Cloudflare backend against a fake D1 (httpx.MockTransport + SQLite) and a fake S3
 client, and the API wired to it. No network, no credentials."""
 import logging
-import os
 import time
 
 import pytest
@@ -187,15 +186,14 @@ def test_schema_applies_statement_by_statement():
 @pytest.fixture()
 def api_cf(monkeypatch):
     pytest.importorskip("fastapi")
-    os.environ.setdefault("EVADE_API_TOKEN", "test-token")
     from fastapi.testclient import TestClient
     from evade.api import app as A
     from evade.baseline.store import BaselineStore
     st, fake = cf_backend()
     monkeypatch.setattr(A.STATE, "storage", st)
     monkeypatch.setattr(A.STATE, "baselines", BaselineStore(st))
-    h = {"Authorization": f"Bearer {os.environ['EVADE_API_TOKEN']}"}
-    return TestClient(A.app), h, A, st, fake
+    from tests.conftest import KEY_HEADER
+    return TestClient(A.app), dict(KEY_HEADER), A, st, fake
 
 
 def _forget(A, uid):

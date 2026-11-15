@@ -6,7 +6,8 @@
 Env (pip install boto3): CF_ACCOUNT_ID, CF_R2_MODELS_BUCKET, EVADE_MODEL_DIR, and
   pull (servers):            CF_R2_MODELS_ACCESS_KEY_ID, CF_R2_MODELS_SECRET_ACCESS_KEY (Object Read only)
   push (training machines):  CF_R2_MODELS_WRITE_ACCESS_KEY_ID, CF_R2_MODELS_WRITE_SECRET_ACCESS_KEY
-Without CF_R2_MODELS_BUCKET it falls back to models/ in CF_R2_BUCKET with the data key (and warns).
+Without CF_R2_MODELS_BUCKET it refuses to run, unless EVADE_ALLOW_SHARED_MODELS_BUCKET=1 (then models/ in
+CF_R2_BUCKET with the data key, with a warning).
 """
 from __future__ import annotations
 

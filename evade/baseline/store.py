@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..storage.base import StorageError, mark_storage_call
+
 # minimum observations before a baseline locks (standard, demo) per modality
 N_NEEDED = {"ecg": (24, 30), "ppg": (24, 30), "eeg": (60, 30), "vitals": (20, 10), "sleep": (7, 3),
             "behavioral": (2, 1), "radiation": (1, 1), "bone": (1, 1)}
@@ -105,6 +107,12 @@ class BaselineStore:
     def dirty(self) -> bool:
         return bool(self._dirty)
 
+    def _mark(self, key: tuple) -> None:
+        """Mark a baseline for the next flush (caller holds the lock). Counts as storage work for this request, so
+        the request's middleware flushes it even if the request made no network call itself."""
+        self._dirty.add(key)
+        mark_storage_call()
+
     def flush(self) -> int:
         """Write changed baselines to storage. On failure they stay marked and the error propagates."""
         if self._storage is None:
@@ -148,7 +156,7 @@ class BaselineStore:
                 b.values.append(float(value))
                 if len(b.values) >= b.n_needed():
                     b.lock()
-                self._dirty.add((user_id, modality, metric))
+                self._mark((user_id, modality, metric))
             return b
 
     def compare(self, user_id: str, modality: str, metric: str, value: float | None, *, quality: float = 1.0,
@@ -171,7 +179,7 @@ class BaselineStore:
             # slow update only while green, so the baseline follows adaptation without absorbing a decline
             if lvl == "green" and b.status == "confirmed":
                 b.center = (1 - EW_ALPHA) * b.center + EW_ALPHA * _t(metric, value)
-                self._dirty.add((user_id, modality, metric))
+                self._mark((user_id, modality, metric))
             conf = "ok" if b.status == "confirmed" else ("demo" if b.mode == "demo" else "provisional")
             return {**out, "baseline_id": b.baseline_id, "baseline_status": b.status, "baseline_center": round(center_raw, 4),
                     "baseline_spread": round(b.spread, 4), "n_baseline": len(b.values), "z": round(z, 3),
@@ -185,18 +193,33 @@ class BaselineStore:
             for (u, m, _), b in self._b.items():
                 if u == user_id and m == modality and b.status == "provisional":
                     b.status, n = "confirmed", n + 1
-                    self._dirty.add((u, m, _))
+                    self._mark((u, m, _))
             return n
 
     def reset(self, user_id: str, modality: str, phase: str = "demo") -> int:
         """Archive in storage first (a failure leaves memory untouched, so a retry archives the same baselines), then
-        in memory. Storage archives the in-memory records' baseline_ids too, so a flush that took its snapshot before
-        the reset cannot write them back, even if they were never stored."""
+        in memory. Storage archives exactly the snapshot's baseline_ids, in-memory records included, so a flush that
+        took its snapshot before the reset cannot write them back, and a baseline created after the snapshot stays.
+        If the archive call fails in a way that may have committed (an outage, a lost response), the archive is
+        checked: when every snapshot id is archived, memory follows instead of keeping baselines storage dropped.
+
+        Known limit: a submit for one of these metrics that lands while the archive call is in flight adds to the old
+        baseline, which is then archived, so that submit's values go to the archive with it."""
         with self._lock:
             snap = {k: b.baseline_id for k, b in self._b.items() if k[0] == user_id and k[1] == modality}
             recs = [self._b[k].record() for k in snap]
-        if self._storage is not None:
-            self._storage.archive_baselines(user_id, modality, recs)
+        if self._storage is not None and snap:
+            try:
+                self._storage.archive_baselines(user_id, modality, recs)
+            except StorageError as e:
+                if not getattr(e, "transient", True):
+                    raise
+                try:
+                    done = self._storage.archived_baseline_ids(user_id, snap.values())
+                except StorageError:
+                    raise e from None
+                if done != set(snap.values()):
+                    raise
         with self._lock:
             n = 0
             for k, bid in snap.items():

@@ -12,7 +12,8 @@
   EVADE_STORE_RAW_WINDOWS    "1" to keep raw signal windows in R2 under raw/<user_id>/ (off by default)
 
 Model artifacts (scripts/fetch_models.py), in their own bucket:
-  CF_R2_MODELS_BUCKET                    models bucket
+  CF_R2_MODELS_BUCKET                    models bucket (required; EVADE_ALLOW_SHARED_MODELS_BUCKET=1 falls back to
+                                         models/ in the data bucket with its read-write key)
   CF_R2_MODELS_ACCESS_KEY_ID / _SECRET_ACCESS_KEY              Object Read only (servers)
   CF_R2_MODELS_WRITE_ACCESS_KEY_ID / _WRITE_SECRET_ACCESS_KEY  Object Read & Write (training machines only)
 """
@@ -58,11 +59,17 @@ def r2_from_env(required: bool = False):
 
 def models_r2_from_env(write: bool = False):
     """The models bucket. Servers read with a read-only key; only training machines hold the write key.
-    Without CF_R2_MODELS_BUCKET, falls back to models/ in the data bucket (and warns: that key can rewrite models)."""
+    Without CF_R2_MODELS_BUCKET it fails closed; EVADE_ALLOW_SHARED_MODELS_BUCKET=1 opts in to models/ in the data
+    bucket with the data key (which can rewrite models, so it is for local experiments only)."""
     from .cloudflare import R2Blobs
     bucket = os.environ.get("CF_R2_MODELS_BUCKET")
     if not bucket:
-        log.warning("CF_R2_MODELS_BUCKET is not set: model artifacts share the data bucket and its read-write key")
+        if os.environ.get("EVADE_ALLOW_SHARED_MODELS_BUCKET") != "1":
+            raise StorageConfigError("CF_R2_MODELS_BUCKET is not set: model artifacts need their own bucket with a "
+                                     "read-only key on servers (or set EVADE_ALLOW_SHARED_MODELS_BUCKET=1 to use "
+                                     "models/ in the data bucket and its read-write key instead)")
+        log.warning("CF_R2_MODELS_BUCKET is not set and EVADE_ALLOW_SHARED_MODELS_BUCKET=1: model artifacts share the "
+                    "data bucket and its read-write key")
         return r2_from_env(required=True)
     pre = "CF_R2_MODELS_WRITE_" if write else "CF_R2_MODELS_"
     names = ("CF_ACCOUNT_ID", f"{pre}ACCESS_KEY_ID", f"{pre}SECRET_ACCESS_KEY")
@@ -83,6 +90,8 @@ def from_env() -> Storage:
     if kind == "memory":
         return NullBackend(store_raw_windows=raw)
     if kind == "cloudflare":
-        from .cloudflare import CloudflareBackend
-        return CloudflareBackend(d1_from_env(), r2_from_env(), store_raw_windows=raw)
+        from .cloudflare import CloudflareBackend, check_schema
+        d1 = d1_from_env()
+        check_schema(d1)                         # a missing migration refuses to start, naming the migration
+        return CloudflareBackend(d1, r2_from_env(), store_raw_windows=raw)
     raise StorageConfigError("EVADE_STORAGE must be memory or cloudflare")

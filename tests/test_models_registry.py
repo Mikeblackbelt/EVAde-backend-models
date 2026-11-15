@@ -1,6 +1,5 @@
 """Model artifact contract: manifest validation, sha256 checks, draft gating, legacy folders, training export, R2 sync."""
 import json
-import os
 from argparse import Namespace
 
 import numpy as np
@@ -201,14 +200,14 @@ def test_push_then_pull_verifies_hashes(tmp_path):
 
 def test_api_lists_unavailable_models(tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
-    os.environ.setdefault("EVADE_API_TOKEN", "test-token")
     from fastapi.testclient import TestClient
     from evade.api import app as A
+    from tests.conftest import KEY_HEADER
     make_folder(tmp_path)
     reg = ModelRegistry(tmp_path, allow_draft=False)
     reg.scan()
     monkeypatch.setattr(A.STATE, "registry", reg)
-    r = TestClient(A.app).get("/v1/models", headers={"Authorization": f"Bearer {os.environ['EVADE_API_TOKEN']}"})
+    r = TestClient(A.app).get("/v1/models", headers=KEY_HEADER)
     d = r.json()["data"]
     assert r.status_code == 200 and d["unavailable"][0]["task"] == "spaceweather"
     assert "EVADE_ALLOW_DRAFT" in d["unavailable"][0]["reason"]
@@ -216,6 +215,6 @@ def test_api_lists_unavailable_models(tmp_path, monkeypatch):
     reg2.scan()
     monkeypatch.setattr(A.STATE, "registry", reg2)
     monkeypatch.setitem(A.STATE.models, "spaceweather", reg2.served()["spaceweather"])
-    d = TestClient(A.app).get("/v1/models", headers={"Authorization": f"Bearer {os.environ['EVADE_API_TOKEN']}"}).json()["data"]
+    d = TestClient(A.app).get("/v1/models", headers=KEY_HEADER).json()["data"]
     row = [m for m in d["models"] if m["task"] == "spaceweather"][0]
     assert row["model_id"] == "EVA-99" and row["headline"] == {"auroc": 0.9} and row["input"]["modality"] == "space_weather"

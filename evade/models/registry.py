@@ -4,8 +4,11 @@ Every folder <EVADE_MODEL_DIR>/<task>/ with a manifest.json is a candidate. A fo
 listed as unavailable with a generic reason code (the detail goes to the log only); nothing here raises at service
 start. Draft models load only with EVADE_ALLOW_DRAFT=1. The beta folders seizure/ and ecg/ from before the manifest
 contract (model.joblib, no manifest.json) still load, with a manifest synthesized from MODEL_REGISTRY.md (EVA-2,
-EVA-6). They are verified only if EVADE_LEGACY_SHA256_SEIZURE / EVADE_LEGACY_SHA256_ECG pins the weights' sha256;
-without a pin they are served marked "unverified" (re-stamp them with evade.models.export to give them a manifest).
+EVA-6). EVADE_LEGACY_SHA256_SEIZURE / EVADE_LEGACY_SHA256_ECG pins the weights' sha256 (a mismatch refuses to load);
+they are served marked "unverified" (re-stamp them with evade.models.export to give them a manifest).
+
+sha256_verified means every file the loader read was hashed: the weights and each file in manifest.files. A sidecar
+it reads that is not in manifest.files (feature_names.json, metrics.json) marks the entry unverified.
 
 Every file is read once: the bytes that are hashed are the bytes that are deserialized (no window between the check
 and the load), and the loaded object must look like a model (predict / predict_proba, a dict of such, an ONNX
@@ -246,11 +249,18 @@ class ModelRegistry:
                 _verify(weights, pin, f"the weights file (pinned by {legacy_pin_var(e.task)})")
                 e.sha256_verified = True
 
+        unhashed: list[str] = []
+
         def sidecar(name: str) -> bytes | None:
+            """A file the loader reads. Only files hashed in manifest.files (or nothing at all) keep the entry
+            verified: reading any other file marks it unverified."""
             if name in side:
                 return side[name]
             p = _inside(e.path, name)
-            return p.read_bytes() if p.is_file() else None
+            if not p.is_file():
+                return None
+            unhashed.append(name)
+            return p.read_bytes()
 
         inp = m["input"]
         if inp.get("kind") == "features":
@@ -263,6 +273,10 @@ class ModelRegistry:
             log.warning("model folder %s manifest lacks %s", e.task, ", ".join(MF.missing_recommended(m)))
         raw = sidecar("metrics.json")
         e.metrics = json.loads(raw.decode("utf-8")) if raw is not None else {}
+        if unhashed and e.sha256_verified:
+            e.sha256_verified = False
+            log.warning("model folder %s: %s not hashed in manifest.files; served as unverified (re-stamp with "
+                        "evade.models.export)", e.task, ", ".join(sorted(set(unhashed))))
         model = LOADERS[m["format"]](weights)
         if not model_type_ok(m["format"], model):
             raise ModelLoadError("unexpected_model_type",
