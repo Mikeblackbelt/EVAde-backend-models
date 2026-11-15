@@ -69,9 +69,11 @@ class Data:
         self.std = (xtr.std(axis=(0, 2)) + 1e-6).astype(np.float32)
         del xtr
 
+        store = torch.float16 if device.type == "cuda" else torch.float32   # CPU convs have no fp16 path (smoke tests)
+
         def to_dev(idx):
             x = (X[idx].astype(np.float32) - self.mean[None, :, None]) / self.std[None, :, None]
-            return torch.from_numpy(x).to(device=device, dtype=torch.float16)
+            return torch.from_numpy(x).to(device=device, dtype=store)
 
         self.xtr, self.ytr = to_dev(tr), torch.from_numpy(y[tr]).to(device)
         self.xva, self.yva, self.pva = to_dev(va), y[va], pat[va]
