@@ -32,7 +32,7 @@ All of them need the same auth header as every other endpoint (see [README.md](R
 ### What feeds the risk score
 
 - **Mock outputs never feed anything.** They never reach the risk engine, flags, overrides, the latest comparisons or baselines. `feed_shadow_risk` refuses any output whose `source` is not `"model"`, and the tests check this.
-- **Real `seizure_deep` outputs** enter the neuro domain as a **shadow** input (metric `seizure_deep_probability`), the same way the beta seizure model does (score 0.40 for `review` and 0.70 for `suspect_seizure`). A shadow input raises R, but it cannot trip the abnormal-component flag or the extreme-domain MDTR cap on its own. `override_candidate` is information for a human. The API never raises override O4 from it.
+- **Real `seizure_deep` outputs** enter the neuro domain as a **shadow** input (metric `seizure_deep_probability`), the same way the beta seizure model does (score 0.40 for `review` and 0.70 for `suspect_seizure`). A shadow input raises R, but it cannot trip the abnormal-component flag or the extreme-domain MDTR cap on its own. A request with `source` set to `simulated` or `replay` is labelled `synthetic`, which makes the risk result provisional. `override_candidate` is information for a human. The API never raises override O4 from it.
 - **Real `ecg_deep` and `sleep_deep` outputs** do not feed the risk score yet, because the beta has no precedent to follow (the beta ECG model does not feed risk either). Mapping total sleep time into B1, or a superclass into the cardiac domain, is a later decision.
 
 ## Requests and responses

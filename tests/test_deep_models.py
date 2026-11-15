@@ -311,6 +311,46 @@ def test_onnx_ecg_switches_to_model_mode(tmp_path, mock_registry):
     assert listing["ecg_deep"]["state"] == "available" and listing["ecg_deep"]["sha256_verified"]
 
 
+def test_ecg_lead_order_and_per_lead_stats_follow_the_manifest(tmp_path, mock_registry):
+    pytest.importorskip("onnxruntime")
+    rng = np.random.default_rng(3)
+    W, b = rng.standard_normal((12, 5)), rng.standard_normal(5)
+    mu, sd = rng.normal(0, 0.05, 12), rng.uniform(0.1, 0.4, 12)
+    perm = rng.permutation(12)                    # model input row i is canonical lead perm[i]
+
+    def folder(root, leads, mean, std, w):
+        m = ecg_manifest()
+        m["input"] = {**m["input"], "leads": leads,
+                      "normalization": {"type": "per_lead_zscore", "mean": list(mean), "std": list(std)}}
+        write_folder(root, "ecg_deep", "model.onnx", onnx_ecg_bytes(w, b), m)
+
+    folder(tmp_path / "a", PTBXL_LEADS, mu, sd, W)
+    folder(tmp_path / "b", [PTBXL_LEADS[p] for p in perm], mu[perm], sd[perm], W[perm])
+    uid = new_user()
+    body = ecg_body(uid, seed=7)
+    use_dir(tmp_path / "a")
+    pa = post("/v1/predict/ecg-deep", body).json()["data"]["probabilities"]
+    use_dir(tmp_path / "b")
+    shuffled = dict(body, leads=body["leads"][::-1], samples=body["samples"][::-1])   # request order differs too
+    pb = post("/v1/predict/ecg-deep", shuffled).json()["data"]
+    assert pb["source"] == "model" and pb["probabilities"] == pa
+    assert len(set(pa.values())) > 1
+
+
+def test_garbage_manifest_is_listed_not_a_500(tmp_path, mock_registry):
+    d = tmp_path / "sleep_deep"
+    d.mkdir()
+    (d / "model.pt").write_bytes(b"x")
+    for bad in ('{"output": "x", "format": "torch"}', '[1, 2]', '{not json', '{"model_id": "EVA-1"}'):
+        (d / "manifest.json").write_text(bad)
+        use_dir(tmp_path)
+        r = C.get("/v1/models", headers=H)
+        assert r.status_code == 200
+        row = {m["task"]: m for m in r.json()["data"]["deep_models"]}["sleep_deep"]
+        assert row["state"] == "unavailable" and row["reason_code"] == "manifest_invalid" and row["output"] is None
+        assert post("/v1/predict/sleep-deep", sleep_body(new_user())).json()["data"]["source"] == "mock"
+
+
 def test_ecg_thresholds_from_manifest_never_invented():
     from evade.models.deep_tasks import EcgAdapter
     cls = ["NORM", "MI", "STTC", "CD", "HYP"]

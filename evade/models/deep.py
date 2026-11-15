@@ -165,7 +165,7 @@ class DeepEntry:
                     MOCK_REASON if self.state == "mock" else None),
                 "sha256_verified": self.sha256_verified,
                 "input": m.get("input") if self.manifest else None,
-                "output": {k: v for k, v in (m.get("output") or {}).items()} if self.manifest else None,
+                "output": m.get("output") if self.manifest else None,
                 "headline": m.get("headline") if self.manifest else None,
                 "code_commit": m.get("code_commit"), "trained_at": m.get("trained_at")}
 
@@ -191,7 +191,7 @@ def _validate(m: dict) -> dict:
     fmt = m.get("format")
     if fmt not in FORMATS:
         raise MF.ManifestError(f"format must be one of {FORMATS}")
-    v = MF.validate({**m, "format": "onnx" if fmt == "onnx" else "torchscript"})
+    v = MF.validate({**m, "format": "onnx" if fmt == "onnx" else "torchscript"}, allow_unassigned=True)
     v["format"] = fmt
     return v
 
@@ -239,12 +239,11 @@ class DeepModelRegistry:
         return self
 
     def _load(self, e: DeepEntry) -> None:
-        m = _read_manifest(e.path)
+        m = _validate(_read_manifest(e.path))       # an invalid manifest is never kept or shown by the API
         e.manifest = m
-        if m.get("model_id") == MF.UNASSIGNED:
+        if m["model_id"] == MF.UNASSIGNED:
             raise ModelLoadError("model_id_unassigned", "model_id not assigned: add a MODEL_REGISTRY.md row, then run "
                                  "python -m evade.models.export --dir <folder> --model-id EVA-<n>")
-        m = e.manifest = _validate(m)
         if m["status"] == "draft" and not self.allow_draft:
             raise ModelLoadError("draft_not_allowed", "draft model; set EVADE_ALLOW_DRAFT=1 to serve it")
         if not runtime_available(RUNTIME[m["format"]]):

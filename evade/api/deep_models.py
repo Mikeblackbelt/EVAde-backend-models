@@ -194,9 +194,10 @@ def model_ids(e: DeepEntry) -> list[str]:
     return [e.manifest["model_id"]] if e.available else []
 
 
-def feed_shadow_risk(A, user_id: str, data: dict, warn: list[str]) -> None:
+def feed_shadow_risk(A, user_id: str, data: dict, warn: list[str], input_source: str = "device") -> None:
     """The only path from a deep output into risk state. Refuses anything that is not a real model output, so a
-    placeholder can never raise a flag, change R, set an override or touch a baseline."""
+    placeholder can never raise a flag, change R, set an override or touch a baseline. Simulated or replayed
+    inputs are labelled synthetic (as in /v1/compare), which makes a risk result provisional."""
     if data.get("source") != "model" or data.get("model_id") is None:
         raise MockOutputError("placeholder outputs never feed the risk engine")
     if data["task"] != "seizure_deep" or data.get("status") != "ok":
@@ -204,7 +205,8 @@ def feed_shadow_risk(A, user_id: str, data: dict, warn: list[str]) -> None:
     color, score = SHADOW_SCORE[data["flag"]]
     comp = {"metric": "seizure_deep_probability", "modality": "eeg", "domain": "neuro",
             "value": data["max_probability"], "level": color, "component_score": score, "shadow": True,
-            "confidence": "demo" if data.get("model_status") == "draft" else "ok", "unit": "probability",
+            "confidence": "synthetic" if input_source in ("simulated", "replay")
+            else "demo" if data.get("model_status") == "draft" else "ok", "unit": "probability",
             "quality_index": data["quality_index"]}
     flags = A.remember(user_id, [comp])
     A.persist_soft(user_id, warn, state_keys=("latest",), flags=flags, endpoint="predict/seizure-deep")
@@ -274,7 +276,7 @@ def build_router(auth_dep) -> APIRouter:
                 "input": {"fs_hz": body.fs_hz, "channels": list(SEIZURE_CHANNELS), "window_s": 4.0, "step_s": 2.0}}
         warn = warnings_for(e)
         if e.available:                          # never for mock: feed_shadow_risk would refuse it anyway
-            feed_shadow_risk(A, body.user_id, data, warn)
+            feed_shadow_risk(A, body.user_id, data, warn, body.source)
         return A.envelope(body.user_id, data, model_ids(e), warn)
 
     @r.post("/models/reload")
