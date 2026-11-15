@@ -6,7 +6,7 @@ Turns space-weather data into inputs for the radiation risk domain (`evade/risk/
 |---|---|---|
 | Providers | one small interface, a NOAA SWPC reference adapter (public, no key), a NASA DONKI event adapter, a file replay adapter, a cache | `providers.py`, `schema.py` |
 | (a) Nowcast | NOAA S-, R- and G-scale levels, flare class, SPE-in-progress flag, DONKI context (recent CMEs, flares, shocks, SEPs) | `model.py` `nowcast`, `donki_summary` |
-| (b) Forecast | P(>=10 MeV proton flux reaches 10 pfu within 24 h), given it is quiet now: draft model EVA-9 (GOES protons and X-rays, per-satellite background correction), trained 1998-2016, tested 2017-2026 including GOES-R | `features.py`, `background.py`, `train.py`, `model.py` `forecast` |
+| (b) Forecast | P(>=10 MeV proton flux reaches 10 pfu within 24 h), given it is quiet now: draft model EVA-12 (GOES protons and X-rays; per-satellite background correction available but off), trained 1998-2016, tested 2017-2026 including GOES-R | `features.py`, `background.py`, `train.py`, `model.py` `forecast` |
 | (c) Dose rate | GCR baseline by location plus an SPE term from proton flux and a shielding preset; a measured dosimeter rate replaces it | `model.py` `dose_estimate` |
 | API | `POST /v1/predict/space-weather` | `evade/api/app.py` |
 
@@ -27,7 +27,7 @@ Write an adapter (below) that returns these fields, converted to these units. On
 | `dose_rate_usv_h` | measured onboard dose-equivalent rate, microSv/h | replaces the modelled dose rate | optional |
 | `proton_satellite` | GOES satellite number of the proton values (for example 18) | picks the per-satellite background correction; without it the proton background is not corrected (warning) | recommended if your data come from GOES |
 
-If your API relays the SWPC operational feed, set `meta["background_prefix"] = "swpc:"` on the `Observations` (as `noaa_swpc` does), because SWPC's GOES-R integral flux has a different quiet floor from the NCEI archive values used in training. CMEs are optional and separate: an adapter can return them as DONKI-style events (`meta["events"]["cme"]`: `t_utc`, `speed_kms`, `half_angle_deg` or `width_deg`, `earth_directed`), or a client can POST them as `cmes` next to `observations` (`t_utc`, `speed_kms`, `half_angle_deg`, `earth_directed`). The served model (EVA-9) does not use them; the CME variant (EVA-11) does.
+If your API relays the SWPC operational feed, set `meta["background_prefix"] = "swpc:"` on the `Observations` (as `noaa_swpc` does), because SWPC's GOES-R integral flux has a different quiet floor from the NCEI archive values used in training. CMEs are optional and separate: an adapter can return them as DONKI-style events (`meta["events"]["cme"]`: `t_utc`, `speed_kms`, `half_angle_deg` or `width_deg`, `earth_directed`), or a client can POST them as `cmes` next to `observations` (`t_utc`, `speed_kms`, `half_angle_deg`, `earth_directed`). The served model (EVA-12) does not use them; the CME variant (EVA-11) does.
 
 Cadence and history: 1-min or 5-min samples for protons and X-rays work best. The SPE flag uses NOAA's rule (three consecutive 5-min points at or above 10 pfu), and coarser data fall back to the latest value. The forecast needs the **last 48 hours**, so `fetch(hours=72)` should return at least 48 h. Kp and solar wind may be hourly or 3-hourly.
 
@@ -67,7 +67,7 @@ NOAA scales (standard thresholds): S1-S5 at >=10 MeV flux 10, 100, 1e3, 1e4, 1e5
 
 `spe_in_progress` feeds `spe_active` of `/v1/predict/radiation-risk`. **Override O5 is not raised from flux.** `risk-score.md` defines O5 as SPE dose >= 250 mSv or projected to reach it within 24 h, so the endpoint returns `o5.candidate` when the *estimated* event dose or its 24 h projection reaches 250 mSv, for a human to confirm (the same pattern as the EEG seizure candidate).
 
-## (b) Forecast (draft; served model EVA-9)
+## (b) Forecast (draft; served model EVA-12)
 
 - **Task:** at an hour when the hourly mean >=10 MeV flux is below 10 pfu, will it reach 10 pfu in any of the next 24 hours (SPE onset)? The hourly mean stands in for NOAA's three-point rule. During an event the endpoint returns `event_in_progress`, not a probability.
 - **Data:**
@@ -83,13 +83,14 @@ Test 2017-01 to 2026-11: 78,878 quiet hours, 1,009 positive, 39 independent onse
 
 | Model | Brier, all test | AUROC, all test | Brier, GOES-R era | AUROC, GOES-R era |
 |---|---|---|---|---|
-| **EVA-9** GOES + background correction (served) | 0.0118 | 0.890 | 0.0172 | 0.832 |
+| EVA-9 GOES + background correction (not served) | 0.0118 | 0.890 | 0.0172 | 0.832 |
 | EVA-11 GOES + CME features + background correction | 0.0117 | 0.892 | 0.0170 | 0.837 |
-| GOES without background correction (comparison) | 0.0113 | 0.892 | 0.0165 | 0.836 |
+| **EVA-12** GOES without background correction (served) | 0.0113 | 0.892 | 0.0165 | 0.836 |
 | Persistence | 0.0117 | 0.763 | 0.0169 | 0.741 |
 | Climatology (training rate 1.63%) | 0.0126 | 0.5 | 0.0182 | 0.5 |
 
-- **Does DONKI/CME add skill?** Barely. In the GOES-R era, AUROC rises by 0.005 (95% block-bootstrap CI +0.0001 to +0.012), but the Brier difference CI (-0.0004 to +0.00004) includes zero. Over the whole test period both CIs include zero. The pre-stated rule (serve the CME model only if its Brier gain is significant over the whole test period) was not met, so EVA-9 is served and DONKI is shown as context. This test measured **CDAW** CME speed and width features, so it does not test DONKI itself. Only CME speed and width ever reached a model; DONKI's earth-directed flag, shocks (IPS), flares and SEPs are display only.
+- **Does DONKI/CME add skill?** Barely. In the GOES-R era, AUROC rises by 0.005 (95% block-bootstrap CI +0.0001 to +0.012), but the Brier difference CI (-0.0004 to +0.00004) includes zero. Over the whole test period both CIs include zero. The pre-stated rule (serve the CME model only if its Brier gain is significant over the whole test period) was not met, so a GOES-only model is served and DONKI is shown as context. This test measured **CDAW** CME speed and width features, so it does not test DONKI itself. Only CME speed and width ever reached a model; DONKI's earth-directed flag, shocks (IPS), flares and SEPs are display only.
+- **Serving (2026-11-15):** EVA-12, the uncorrected variant, is served. It scored better than EVA-9 on every metric, and the correction failed its overlap check. The correction code stays, off by default (`train.py --background-correction` to serve the corrected model). EVA-12's mean p in the GOES-R era is 0.026 against a rate of 0.019 (about 1.4x too high).
 - **Calibration in the GOES-R era (EVA-9):** the model is well calibrated below p = 0.01 (0.0045 vs observed 0.0046) and over-forecasts above that: 0.14 vs 0.07 in the 0.1-0.2 bin, 0.38 vs 0.20 in 0.3-0.5, 0.68 vs 0.45 above 0.5. Mean p is 0.027 against a rate of 0.019, so about 1.5x too high, better than EVA-8's 2x on cycle 24. Its Brier is slightly **worse** than persistence's (0.01715 vs 0.01694 in the GOES-R era; 0.01178 vs 0.01173 overall), while its ranking is much better (AUROC 0.83 vs 0.74). Only the uncorrected variant beats persistence on Brier.
 - The GOES-15 era of the test (2017 to 2020-03) holds only 2 onsets. Its scores (AUROC 0.997) are not informative.
 
@@ -158,7 +159,7 @@ python -I -c "import sys; sys.path.insert(0, '<code dir>'); from evade.spaceweat
 
 - **DONKI history was not used for training.** On 2026-11-15 the keyless CCMC endpoint did not answer from the lab server or a local PC. api.nasa.gov with `DEMO_KEY` allows about 10 requests per hour and windows of at most 60 days, and its FLR route returned 404. So the CME features were trained on the SOHO/LASCO CDAW catalogue and are served from DONKI. CDAW speeds are plane-of-sky, DONKI's are deprojected (usually higher), so served CME features run high compared with training. The DONKI SEP list was not used as a label check either. With a NASA API key, the download script can fetch the full history.
 - **GOES-R integral protons are integrated by us** from SGPS differential channels. They are not SWPC's operational product, and NCEI has no GOES-R proton L2 data before 2020-11.
-- The background correction does not improve the GOES-16/18 overlap agreement or the forecast. It removes the generation offset in the quiet floors, but it cannot be validated on a common time window across generations.
+- The background correction (off by default) does not improve the GOES-16/18 overlap agreement or the forecast. It removes the generation offset in the quiet floors, but it cannot be validated on a common time window across generations.
 - Floors for test years are estimated from the whole test year (quiet hours only), a mild look-ahead in the correction.
 - The test has one split. Its 39 onsets sit almost all in cycle 25. Probabilities are about 1.5x too high in the GOES-R era. Use the output as a ranked watch signal for human review.
 - XRS: the 5-min GOES-8..12 data slightly lower hourly peaks compared with the 1-min GOES-13+ data. The forecast uses no radio burst or active-region information.
