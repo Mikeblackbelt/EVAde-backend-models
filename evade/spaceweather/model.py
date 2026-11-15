@@ -240,7 +240,14 @@ def load_forecaster(root: str | Path) -> dict | None:
     if not (d / "manifest.json").exists() or not (d / "model.joblib").exists():
         return None
     man = json.loads((d / "manifest.json").read_text())
-    digests = man.get("sha256") if isinstance(man.get("sha256"), dict) else {}
+    # two manifest layouts: the original one (sha256 = {file: digest}) and the model registry's (sha256 = weights digest,
+    # files = {sidecar: digest}), which scripts/fetch_models.py needs to push the folder to and pull it from R2
+    if isinstance(man.get("sha256"), dict):
+        digests = man["sha256"]
+    elif isinstance(man.get("sha256"), str):
+        digests = {**(man.get("files") or {}), man.get("weights", "model.joblib"): man["sha256"]}
+    else:
+        digests = {}
 
     unhashed: list[str] = []
 

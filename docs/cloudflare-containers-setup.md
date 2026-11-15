@@ -59,27 +59,26 @@ backend caller ──HTTPS──▶ Worker "evade-gateway" ──▶ Durable Obj
 
 ## 1. A container image that pulls models from R2
 
-Containers have no volume mounts, so this image downloads the model folders (sha256-checked) at start. Create `Dockerfile.cloudflare` in the backend repo:
+Containers have no volume mounts, so the image downloads the model folders (sha256-checked) at start. Use the repo's
+`Dockerfile.cloudflare`:
+- `python:3.12-slim`, with the pinned `requirements.txt` (including `onnxruntime` for the ONNX deep models) plus
+  `boto3`; no torch, so the image stays small and cold starts stay short;
+- at start it runs `scripts/fetch_models.py --dest /models` with the read-only models key, then uvicorn with
+  `--no-access-log`. A folder that fails its checksum is skipped (listed as unavailable) and the API still starts;
+- `.dockerignore` already includes `!scripts/fetch_models.py`;
+- there is no `--platform` in the `FROM` line. `wrangler deploy` builds for linux/amd64; elsewhere use
+  `docker build --platform linux/amd64 -f Dockerfile.cloudflare .`.
 
-```dockerfile
-FROM --platform=linux/amd64 python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 EVADE_MODEL_DIR=/models
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt boto3
-COPY evade ./evade
-COPY scripts/fetch_models.py ./scripts/fetch_models.py
-RUN useradd --create-home --uid 10001 evade && mkdir -p /models && chown evade /models
-USER evade
-EXPOSE 8000
-# ";" not "&&": a model that fails its checksum is left out (listed as unavailable) and the API still starts.
-# --no-access-log: access logs would record user IDs from URL paths.
-CMD ["sh", "-c", "python scripts/fetch_models.py --dest /models; exec uvicorn evade.api.app:app --host 0.0.0.0 --port 8000 --no-server-header --no-access-log"]
+**Uploading models to the bucket** (training machine, models bucket WRITE key in the environment only):
+
+```bash
+python scripts/stamp_models_for_push.py --out push_ready --ecg <beta ecg> --seizure <beta seizure>        --spaceweather <spaceweather folder> --ecg-deep <deep ECG export> --id ecg_deep=EVA-13
+for t in ecg seizure spaceweather ecg_deep; do python scripts/fetch_models.py --push push_ready/$t; done
 ```
 
-Then:
-- **Include the fetch script.** In `.dockerignore`, add `!scripts/fetch_models.py` on a line **after** the `scripts` line. Confirm with `docker build -f Dockerfile.cloudflare .`.
-- **Pin library versions** in `requirements.txt`: scikit-learn, numpy, scipy and joblib must match training (Google Cloud tutorial, step 0). Pin `boto3` too, and keep test-only packages such as pytest out of the image.
+The stamp script gives every folder a registry manifest with a real `EVA-n` ID (an `UNASSIGNED` folder is listed
+but not served) and sha256 for every file. Folder names are the task names the API looks up: `ecg`, `seizure`,
+`spaceweather`, `ecg_deep` (and `sleep_deep`, `seizure_deep` once trained). Then restart the container so it pulls them.
 
 ## 2. The Worker project
 
