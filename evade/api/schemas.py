@@ -98,6 +98,9 @@ class Reading(BaseModel):
 
 class UserCreate(BaseModel):
     consent: bool
+    user_id: UserId | None = Field(None, description="optional: register under an existing ID (the team's users.user_id, a "
+                                   "lowercase UUID). Unknown: created with it; existing: returned as is (200, "
+                                   "idempotent); deleted: 409 user_deleted. Omitted: the server generates a UUID")
     cohort: ShortText | None = Field(None, max_length=32)
     age_band: Literal["18-29", "30-39", "40-49", "50-59", "60+"] | None = None
     sex: Literal["f", "m", "x", "unspecified"] | None = None
@@ -206,7 +209,7 @@ class CmeIn(BaseModel):
 
 
 class SpaceWeatherRequest(BaseModel):
-    user_id: str
+    user_id: UserId
     provider: Literal["noaa_swpc", "replay"] | None = Field(None, description="server-side provider by name; or send observations")
     observations: list[SpaceWeatherObs] | None = Field(None, max_length=5000)
     location: Literal["deep_space", "lunar_surface", "mars_surface", "leo_iss"] = "deep_space"

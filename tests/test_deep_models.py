@@ -282,8 +282,9 @@ def test_auth_and_unknown_user(mock_registry):
     bad = {"X-EVAde-Key": "wrong-key-0123456789abcdef-0123456789"}
     assert C.post("/v1/predict/sleep-deep", json={}, headers=bad).status_code == 401
     assert C.post("/v1/models/reload", headers=bad).status_code == 401
-    r = post("/v1/predict/ecg-deep", ecg_body("no-such-user"))
+    r = post("/v1/predict/ecg-deep", ecg_body("00000000-0000-4000-8000-000000000000"))
     assert r.status_code == 404 and r.json()["error"]["code"] == "user_not_found"
+    assert _err(post("/v1/predict/ecg-deep", ecg_body("no-such-user"))) == (422, "validation_error")   # UUIDs only
 
 
 # ---------------- real models ----------------

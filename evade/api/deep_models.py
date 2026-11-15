@@ -27,7 +27,7 @@ from ..models.deep import DEEP_TASKS, DeepEntry, DeepModelRegistry
 from ..models.deep_tasks import (ADAPTERS, ECG_FS, ECG_LEADS, EPOCH_S, MOCK_SEIZURE_THRESHOLDS, SEIZURE_CHANNELS,
                                  SLEEP_CHANNELS, SLEEP_FS, ecg_resample_ratio)
 from ..preprocessing.eeg import norm_bipolar_name
-from .schemas import Source, _not_future
+from .schemas import Source, UserId, _not_future
 
 MOCK_WARNING = "placeholder output: model not trained yet; not a prediction"
 MAX_ECG_ROW = 10_500                  # samples per lead: 10.5 s at up to 1000 Hz
@@ -86,7 +86,7 @@ def _key_ecg(name: str) -> str:
 
 
 class _Base(BaseModel):
-    user_id: str = Field(min_length=1, max_length=128)
+    user_id: UserId                      # lowercase UUID, as every other endpoint
     t0_utc: datetime | None = None
     source: Source = "device"
 

@@ -618,17 +618,47 @@ def headline(task: str, m: dict) -> dict:
     return (m.get("manifest") or {}).get("headline") or headline_from_metrics(task, m.get("metrics") or {})
 
 
+def _user_out(uid: str, rec: dict, created: bool) -> dict:
+    return {"user_id": uid, "created": created,
+            "created_at": datetime.fromtimestamp(float(rec.get("created_at") or time.time()), timezone.utc).isoformat()}
+
+
+def _user_deleted() -> HTTPException:
+    return err(409, "user_deleted", "this user_id was deleted and cannot be registered again", "user_id")
+
+
 @app.post("/v1/users")
 def create_user(body: S.UserCreate):
-    uid = str(uuid.uuid4())
     rec = {"created_at": time.time(), "cohort": body.cohort, "age_band": body.age_band, "sex": body.sex}
-    # persisted first: a 503 here leaves no half-created user in memory. If the row commits but the response is lost,
-    # the client retries and gets a new user; the first row is an orphan nobody holds the ID of, with only created_at
-    # and the coarse attributes above (no health data). Accepted for the beta (see the README).
-    STATE.storage.put_user(uid, rec)
+    uid = body.user_id
+    if uid is None:
+        uid = str(uuid.uuid4())
+        # persisted first: a 503 here leaves no half-created user in memory. If the row commits but the response is
+        # lost, the client retries and gets a new user; the first row is an orphan nobody holds the ID of, with only
+        # created_at and the coarse attributes above (no health data). Accepted for the beta (see the README). Send
+        # user_id to make the call idempotent instead.
+        STATE.storage.put_user(uid, rec)
+        with STATE.lock:
+            STATE.users[uid] = rec
+        return envelope(uid, _user_out(uid, rec, True))
+    # register under a caller-chosen ID: idempotent, and a deleted (tombstoned) ID is never brought back
+    if uid in STATE.pending_deletes or STATE.storage.is_deleted(uid):
+        raise _user_deleted()
+    existing = STATE.users.get(uid)
+    if existing is None and STATE.storage.persistent:
+        STATE.missing.discard(uid)               # a cached miss must not hide a row another instance wrote
+        existing = hydrate(uid)
+        if existing is None and STATE.storage.is_deleted(uid):    # deleted between the checks
+            raise _user_deleted()
+    if existing is not None:
+        return envelope(uid, _user_out(uid, existing, False))     # attributes of an existing user are not changed
+    STATE.storage.put_user(uid, rec)             # tombstone-gated in storage (the D1 insert checks it too)
     with STATE.lock:
-        STATE.users[uid] = rec
-    return envelope(uid, {"user_id": uid, "created_at": datetime.now(timezone.utc).isoformat()})
+        if STATE.storage.is_deleted(uid, check_remote=False) or uid in STATE.pending_deletes:
+            raise _user_deleted()                # a DELETE for this ID ran meanwhile: nothing is put back
+        cur = STATE.users.setdefault(uid, rec)   # a concurrent create with the same ID: both get the same user
+    STATE.missing.discard(uid)
+    return envelope(uid, _user_out(uid, cur, cur is rec))
 
 
 @app.delete("/v1/users/{user_id}")
