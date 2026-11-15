@@ -18,4 +18,8 @@ COPY evade ./evade
 RUN useradd --create-home --uid 10001 evade
 USER evade
 EXPOSE 8000
-CMD ["uvicorn", "evade.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
+# Forwarded headers are trusted only from FORWARDED_ALLOW_IPS (uvicorn reads it; default 127.0.0.1, e.g. a local
+# Cloudflare Tunnel). On Cloud Run set FORWARDED_ALLOW_IPS='*': only Google's front end can reach the container and it
+# overwrites X-Forwarded-Proto. Never expose port 8000 directly.
+ENV FORWARDED_ALLOW_IPS=127.0.0.1
+CMD ["uvicorn", "evade.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]

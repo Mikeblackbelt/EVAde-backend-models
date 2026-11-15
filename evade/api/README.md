@@ -28,7 +28,7 @@ docker run -p 8000:8000 --env-file <file outside the repo with EVADE_API_KEY=...
 - **Backend to backend only.** Only our own backend calls this service. There is no CORS, so browsers cannot call it, and the key never goes to a browser or an app.
 - **WebSockets too.** No WebSocket route exists yet; a guard in front of the app already closes any WebSocket connection without the key (code 1008).
 - **Docs off.** `/docs`, `/redoc` and `/openapi.json` are off unless `EVADE_ENABLE_DOCS=1`, and then they are still behind the key.
-- **HTTPS only.** TLS is terminated by Cloud Run or Cloudflare (Tunnel or proxy) in front of the container; the container itself speaks plain HTTP on its private port. With `EVADE_REQUIRE_HTTPS=1` the service also rejects any request whose `X-Forwarded-Proto` is `http` (403 `https_required`).
+- **HTTPS only.** TLS is terminated by Cloud Run or Cloudflare (Tunnel or proxy) in front of the container; the container itself speaks plain HTTP on its private port. With `EVADE_REQUIRE_HTTPS=1` the service also rejects any request whose `X-Forwarded-Proto` is `http` (403 `https_required`). Forwarded headers are trusted only from `FORWARDED_ALLOW_IPS` (default `127.0.0.1`, right for a local Cloudflare Tunnel). On Cloud Run set `FORWARDED_ALLOW_IPS='*'`, because only Google's front end can reach the container and it overwrites `X-Forwarded-Proto`. Never expose port 8000 directly.
 - **No health data in logs.** No log line contains a request body, signal values, readings, self-report or instrument answers, journal text, user IDs or header values. Storage and model errors are logged with generic messages, an unexpected exception only by its type and the request ID, and the `botocore`, `httpx` and `httpcore` loggers stay at WARNING. Run uvicorn with `--no-access-log` (the Dockerfile does), because access lines contain URL paths with user IDs. Cloud Run's own request log still records URL paths, which contain pseudonymous user IDs (not names), and never bodies.
 - **Validated inputs.** Every request body is a Pydantic model with limits: string lengths and patterns, list lengths and numeric ranges. `user_id` must be a lowercase UUID (as `POST /v1/users` returns it) in bodies, paths and queries alike. `device_id` must match `[A-Za-z0-9][A-Za-z0-9._:-]{2,63}`. Metric, unit and channel names are short tokens, and enums are allow-lists. Bodies are capped at 1 MB and need a `Content-Length`.
 - **One error shape.** Every error is `{"error": {"code": ..., "message": ..., "field": ...}}`, with `field` set when one field is at fault. Validation errors never echo the submitted value (pydantic's `input` and `ctx` are dropped).
@@ -41,7 +41,7 @@ gcloud secrets add-iam-policy-binding evade-api-key \
     --member=serviceAccount:<run service account> --role=roles/secretmanager.secretAccessor
 gcloud run deploy evade-api --image <image> --region <region> \
     --set-secrets EVADE_API_KEY=evade-api-key:latest \
-    --set-env-vars EVADE_REQUIRE_HTTPS=1 \
+    --set-env-vars EVADE_REQUIRE_HTTPS=1,FORWARDED_ALLOW_IPS='*' \
     --max-instances 1 --concurrency 20
 ```
 

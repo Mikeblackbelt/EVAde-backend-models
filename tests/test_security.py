@@ -334,6 +334,7 @@ def test_unsendable_keys_are_refused(key):
     assert A.api_key_problem(key) is not None
 
 
-def test_dockerfile_trusts_the_proxy_scheme():
+def test_dockerfile_trusts_forwarded_headers_only_from_configured_proxies():
     text = (ROOT / "Dockerfile").read_text()
-    assert "--forwarded-allow-ips" in text
+    assert "FORWARDED_ALLOW_IPS=127.0.0.1" in text          # default: local proxy only
+    assert '"--forwarded-allow-ips", "*"' not in text         # never trust every peer by default
