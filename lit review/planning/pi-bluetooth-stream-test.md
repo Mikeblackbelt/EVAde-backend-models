@@ -49,12 +49,12 @@ BLE is the bottleneck for raw waveforms, so each simulated device copies what re
 | 12-lead ECG | n/a | 12 leads, 500 Hz | about 96 kbps | **no**: Wi-Fi only |
 
 Notes:
-- **Packet format.** Each notification carries a small header: device sample counter, generation time in ms, and a scenario tag. The gateway uses it to measure BLE loss and latency without logging any signal values. Payloads use the negotiated MTU (BlueZ supports large MTUs and data length extension), but measure the real rate in phase 1 rather than trusting nominal numbers.
+- **Packet format.** Each notification carries a small header: device sample counter, generation time in ms, and a scenario tag. The gateway uses it to measure BLE loss and latency without logging any signal values. Payloads use the negotiated MTU (BlueZ negotiates ATT MTUs above 23; data length extension depends on the controllers at both ends, so confirm it with `btmon`), but measure the real rate in phase 1 rather than trusting nominal numbers.
 - **Which models the BLE devices feed.** The deep ECG model needs **12 leads**, so it is tested over the Wi-Fi path with replayed 12-lead records. The BLE single-lead patch feeds the beta `/v1/predict/ecg` (HR, HRV, rhythm backstop) and the baseline comparison. That's also true of real single-lead patches.
 - **API rules the gateway must respect** (from the API):
   - windows are 2-60 s;
   - an ingest batch holds at most 20 windows or 500 readings;
-  - request bodies are at most 1 MB with a `Content-Length` header (about 30 s of 18-channel EEG fits);
+  - request bodies are at most 1 MB with a `Content-Length` header (30 s of 18-channel EEG is about 138k JSON numbers, so it fits only with compact values of about 6-7 characters each; full-precision floats fit only about 10 s);
   - `seq` increases by one per batch per device.
 
 ## 4. Synthetic data

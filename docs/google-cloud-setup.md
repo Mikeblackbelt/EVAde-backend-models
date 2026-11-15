@@ -7,8 +7,8 @@ This puts the beta FastAPI service (`evade/api`) on a public HTTPS URL that the 
 ## What you end up with
 
 ```
-frontend (server side) ──HTTPS──▶ Cloud Run service "evade-api" (1 instance, 1 GiB, port 8000)
-                                    ├── EVADE_API_TOKEN, from Secret Manager
+team backend Worker ──HTTPS──▶ Cloud Run service "evade-api" (1 instance, 1 GiB, port 8000)
+                                    ├── EVADE_API_KEY, from Secret Manager
                                     └── /models (read-only), from a private Cloud Storage bucket
 ```
 
@@ -42,7 +42,6 @@ Cloud Shell sessions time out and forget variables. Write the settings to a file
 cat > ~/evade.env <<'EOF'
 export PROJECT=evade-demo-xyz123                 # globally unique project id: lowercase, digits, dashes
 export REGION=us-east1                           # any Cloud Run region near you
-export FRONTEND_ORIGIN=https://your-frontend.example   # exact origin, no trailing slash; leave empty if no frontend yet
 export SA=evade-api@${PROJECT}.iam.gserviceaccount.com
 export BUCKET=${PROJECT}-evade-models
 EOF
@@ -78,15 +77,15 @@ Later steps give this account read access to the model bucket and the token, and
 ```bash
 # generates a random token and stores it; it is never printed or written to a file
 python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" | \
-    gcloud secrets create evade-api-token --replication-policy=automatic --data-file=-
+    gcloud secrets create evade-api-key --replication-policy=automatic --data-file=-
 
-gcloud secrets add-iam-policy-binding evade-api-token \
+gcloud secrets add-iam-policy-binding evade-api-key \
     --member="serviceAccount:$SA" --role=roles/secretmanager.secretAccessor
 ```
 
-**Who may hold the token.** The token protects every route, so it must not reach a browser. If the frontend is a browser app, put the token in a small server-side piece that adds the `Authorization` header: the frontend's own server route, or a Cloudflare Worker. Anything in browser JavaScript is visible to every visitor, and anyone holding the token can create users until the single in-memory instance runs out of memory. If there is no server side for the hackathon, treat the demo token as public, and rotate it right after the demo (step 9).
+**Who may hold the key.** Only the team's backend Worker calls the API: it sends `X-EVAde-Key` from a Worker secret. No browser calls the API (there is no CORS), and the key must never appear in browser code.
 
-To read the token for a server-side config or a test, run `gcloud secrets versions access latest --secret=evade-api-token`. Share it through a password manager, never chat.
+To read the token for a server-side config or a test, run `gcloud secrets versions access latest --secret=evade-api-key`. Share it through a password manager, never chat.
 
 ## 5. Upload the models to a private bucket
 
@@ -141,18 +140,14 @@ Don't grant `roles/storage.admin` or Editor to fix build errors. Either would le
 ## 7. Deploy to Cloud Run
 
 ```bash
-CORS_FLAG=""
-[ -n "$FRONTEND_ORIGIN" ] && CORS_FLAG="--update-env-vars=^@^EVADE_CORS_ORIGINS=$FRONTEND_ORIGIN"
-
 gcloud run deploy evade-api \
     --image=$IMAGE --region=$REGION \
     --service-account=$SA \
     --port=8000 --memory=1Gi --cpu=1 \
     --min=1 --max=1 \
     --execution-environment=gen2 \
-    --set-secrets=EVADE_API_TOKEN=evade-api-token:latest \
-    --set-env-vars=EVADE_ALLOW_DRAFT=1,EVADE_MODEL_DIR=/models \
-    $CORS_FLAG \
+    --set-secrets=EVADE_API_KEY=evade-api-key:latest \
+    --set-env-vars=EVADE_ALLOW_DRAFT=1,EVADE_MODEL_DIR=/models,FORWARDED_ALLOW_IPS='*' \
     --add-volume=name=models,type=cloud-storage,bucket=$BUCKET,readonly=true \
     --add-volume-mount=volume=models,mount-path=/models \
     --allow-unauthenticated
@@ -165,8 +160,7 @@ gcloud run deploy evade-api \
 | `--min=1 --max=1` | service-level instance limits (older gcloud versions call them `--min-instances` / `--max-instances`). **Run exactly one instance.** The beta keeps users and baselines in memory. A second instance would have its own users, and scaling to zero would wipe them. Keep `--max=1` even after Cloudflare storage is added: the API's deletion gate and device checks are per process (see `evade/api/README.md`). Cloud Run can briefly exceed the maximum during traffic spikes, which is acceptable for a demo. |
 | `--execution-environment=gen2` | needed for the Cloud Storage volume mount |
 | `--set-secrets` | injects the token from Secret Manager as an environment variable |
-| `^@^` before `EVADE_CORS_ORIGINS` | switches gcloud's list delimiter to `@`, so a comma-separated list of origins survives (`https://a.example,https://b.example`). With no origin set, the API adds no CORS headers. Add one later with `gcloud run services update evade-api --region=$REGION --update-env-vars=^@^EVADE_CORS_ORIGINS=...`. |
-| `--allow-unauthenticated` | the API checks its own bearer token on every route except `/v1/health`, `/docs` and `/openapi.json`, which are public and show the API's shape and loaded models. If your organization blocks public services, drop this flag. Server-side callers then send a Google identity token in `X-Serverless-Authorization: Bearer ...` and keep the EVAde token in `Authorization: Bearer ...`. Browsers can't easily do that. |
+| `--allow-unauthenticated` | the API requires `X-EVAde-Key` on every route, including `/v1/health`; docs are off. If your organization blocks public services, drop this flag: callers then send a Google identity token in `Authorization: Bearer ...` and keep the EVAde key in `X-EVAde-Key` (server-to-server only). |
 
 **Restarts lose in-memory state.** Every deploy, settings change or restart starts a new container, which loses users and baselines until Cloudflare storage is on. Deploy before the demo, not during it.
 
@@ -175,20 +169,22 @@ gcloud run deploy evade-api \
 ```bash
 export URL=$(gcloud run services describe evade-api --region=$REGION --format='value(status.url)')
 echo "export URL=$URL" >> ~/evade.env
-curl -s $URL/v1/health                   # no token needed; lists the loaded models (expect seizure and ecg)
-TOKEN=$(gcloud secrets versions access latest --secret=evade-api-token)
-curl -s -H "Authorization: Bearer $TOKEN" $URL/v1/models
-curl -s -X POST $URL/v1/users -H "Authorization: Bearer $TOKEN" \
+curl -s -o /dev/null -w "%{http_code}
+" $URL/v1/health   # expect 401 without the key
+TOKEN=$(gcloud secrets versions access latest --secret=evade-api-key)
+curl -s -H "X-EVAde-Key: $TOKEN" $URL/v1/health     # loaded models
+curl -s -H "X-EVAde-Key: $TOKEN" $URL/v1/models
+curl -s -X POST $URL/v1/users -H "X-EVAde-Key: $TOKEN" \
      -H "Content-Type: application/json" -d '{"consent": true, "cohort": "demo"}'
 unset TOKEN
 ```
 
 Interactive docs are at `$URL/docs`.
 
-**Replay demo.** To replay a real EEG recording through the deployed API, run it from a clone of the repo with `pip install -r requirements.txt` and the EDF file on disk. The script reads the token from `EVADE_API_TOKEN`; its docstring lists all options.
+**Replay demo.** To replay a real EEG recording through the deployed API, run it from a clone of the repo with `pip install -r requirements.txt` and the EDF file on disk. The script reads the token from `EVADE_API_KEY`; its docstring lists all options.
 
 ```bash
-EVADE_API_TOKEN="$(gcloud secrets versions access latest --secret=evade-api-token)" \
+EVADE_API_KEY="$(gcloud secrets versions access latest --secret=evade-api-key)" \
   python scripts/demo_replay.py --api $URL --edf path/to/recording.edf --seizure ONSET_S OFFSET_S
 ```
 
@@ -220,10 +216,10 @@ Cloud Run can restart the instance at any time, so never leave a half-uploaded m
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" | \
-    gcloud secrets versions add evade-api-token --data-file=-
+    gcloud secrets versions add evade-api-key --data-file=-
 gcloud run services update evade-api --region=$REGION        # picks up "latest"
-gcloud secrets versions list evade-api-token                 # then disable the old one:
-gcloud secrets versions disable OLD_VERSION_NUMBER --secret=evade-api-token
+gcloud secrets versions list evade-api-key                 # then disable the old one:
+gcloud secrets versions disable OLD_VERSION_NUMBER --secret=evade-api-key
 ```
 
 ## 10. Later: Cloudflare storage
@@ -265,7 +261,6 @@ With state in Cloudflare, `--min=0` becomes acceptable: a cold start of a few se
 | `413 payload_too_large` | Bodies are capped at 1 MB, about 30 s of 18-channel EEG. Send long recordings in several calls. |
 | users disappear | The instance restarted or was redeployed (in-memory beta), or more than one instance ran. Check `--max=1`. |
 | deploy rejects the volume, `--min` or `--max` flags | Update gcloud (`gcloud components update`; Cloud Shell is usually current). Check that `--execution-environment=gen2` is set. |
-| browser CORS errors | `EVADE_CORS_ORIGINS` must match the frontend origin exactly: scheme, host and port, no trailing slash. |
 | a variable is empty after a break | `source ~/evade.env` |
 
 ## Costs and teardown
@@ -280,7 +275,7 @@ gcloud run services delete evade-api --region=$REGION
 gcloud storage rm --recursive gs://$BUCKET
 gcloud storage rm --recursive gs://${PROJECT}_cloudbuild        # build source uploads
 gcloud artifacts repositories delete evade --location=$REGION
-gcloud secrets delete evade-api-token        # and cf-api-token, cf-r2-key-id, cf-r2-secret if created
+gcloud secrets delete evade-api-key        # and cf-api-token, cf-r2-key-id, cf-r2-secret if created
 gcloud compute instances delete evade-api-vm --zone=${REGION}-b   # only if you made the VM below
 gcloud iam service-accounts delete $SA
 ```

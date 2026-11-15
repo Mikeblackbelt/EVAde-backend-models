@@ -1,0 +1,10 @@
+.git
+data
+external
+lit review
+tests
+scripts
+!scripts/fetch_models.py
+**/__pycache__
+*.parquet
+*.joblib

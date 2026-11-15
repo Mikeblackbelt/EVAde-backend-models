@@ -25,15 +25,27 @@ def _save(out: Path, dataset: str, record: str, wins: np.ndarray, extra: dict | 
     np.savez_compressed(d / f"{record}.npz", windows=wins, **(extra or {}))
 
 
-def read_edf(path: Path) -> tuple[np.ndarray, list[str], float, "pd.Timestamp | None"]:
-    """Read all channels of an EDF with the same sampling rate (the most common one). Returns data, names, fs, start."""
+def read_edf(path: Path, label_prefix: str | None = None) -> tuple[np.ndarray, list[str], float, "pd.Timestamp | None"]:
+    """Read the channels of an EDF that share one sampling rate. Returns data, names, fs, start.
+
+    Without `label_prefix`, the most common rate is used. With it, only channels whose label starts with the
+    prefix are read and the rate is theirs (needed for Sleep-EDFx, where EEG is 100 Hz but most channels are 1 Hz
+    or 100 Hz mixed with others, so the most common rate may not be the EEG one).
+    """
     import pyedflib
     f = pyedflib.EdfReader(str(path))
     try:
         n = f.signals_in_file
         fss = [f.getSampleFrequency(i) for i in range(n)]
-        fs = max(set(fss), key=fss.count)
-        keep = [i for i in range(n) if fss[i] == fs]
+        if label_prefix is not None:
+            cand = [i for i in range(n) if f.getLabel(i).strip().startswith(label_prefix)]
+            if not cand:
+                raise ValueError(f"no channel with label prefix {label_prefix!r} in {Path(path).name}")
+            fs = max(set(fss[i] for i in cand), key=[fss[i] for i in cand].count)
+            keep = [i for i in cand if fss[i] == fs]
+        else:
+            fs = max(set(fss), key=fss.count)
+            keep = [i for i in range(n) if fss[i] == fs]
         data = np.stack([f.readSignal(i) for i in keep])
         names = [f.getLabel(i) for i in keep]
         start = pd.Timestamp(f.getStartdatetime())
@@ -217,9 +229,8 @@ def run_sleepedfx(root: Path, out: Path, limit: int | None = None) -> pd.DataFra
         hyp = next(iter(base.glob(psg.name[:7] + "*-Hypnogram.edf")), None)
         if hyp is None:
             continue
-        data, names, fs, _ = read_edf(psg)
-        keep = [i for i, n in enumerate(names) if n.strip().startswith("EEG")]
-        x_p, fs_p = preprocess_eeg(data[keep], fs, mains=50.0)
+        data, names, fs, _ = read_edf(psg, label_prefix="EEG")   # Fpz-Cz and Pz-Oz at 100 Hz
+        x_p, fs_p = preprocess_eeg(data, fs, mains=50.0)
         on, du, de, _ = read_edf_annotations(hyp)
         wins, df = window_table(x_p, fs_p, config.SLEEP_EPOCH_S, config.SLEEP_EPOCH_S,
                                 participant_id=psg.name[:5], record_id=psg.name[:7], dataset="sleepedfx", modality="eeg")
@@ -235,10 +246,11 @@ def run_nhanes(root: Path, out: Path, limit: int | None = None) -> pd.DataFrame:
     fem = pd.read_sas(root / "P_DXXFEM.xpt", format="xport")
     spn = pd.read_sas(root / "P_DXXSPN.xpt", format="xport")
     dem = pd.read_sas(root / "P_DEMO.xpt", format="xport")[["SEQN", "RIAGENDR", "RIDAGEYR", "RIDRETH3"]]
-    d = dem.merge(fem[["SEQN", "DXXNKBMD", "DXXOSBMD"]], on="SEQN", how="inner").merge(
+    # femur file: DXXOFBMD = total femur, DXXNKBMD = femoral neck; spine file: DXXOSBMD = total spine (verified on the files)
+    d = dem.merge(fem[["SEQN", "DXXNKBMD", "DXXOFBMD"]], on="SEQN", how="inner").merge(
         spn[["SEQN", "DXXOSBMD"]].rename(columns={"DXXOSBMD": "DXXSPBMD"}), on="SEQN", how="left")
     d = d.rename(columns={"RIAGENDR": "sex", "RIDAGEYR": "age", "RIDRETH3": "race_eth",
-                          "DXXNKBMD": "femoral_neck_bmd", "DXXOSBMD": "total_femur_bmd", "DXXSPBMD": "spine_bmd"})
+                          "DXXNKBMD": "femoral_neck_bmd", "DXXOFBMD": "total_femur_bmd", "DXXSPBMD": "spine_bmd"})
     d["participant_id"] = "nhanes-" + d.SEQN.astype(int).astype(str)
     d["dataset"], d["modality"] = "nhanes", "bone_reference"
     out.mkdir(parents=True, exist_ok=True)

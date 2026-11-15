@@ -26,6 +26,7 @@ Two automatically computed outputs per crew member, refreshed on a schedule, wit
 | [pi-bluetooth-stream-test.md](pi-bluetooth-stream-test.md) | Raspberry Pi as synthetic BLE wearables (HR, 1-lead ECG, PPG, EEG) through a gateway to the API: latency, event-to-flag time, capacity of one instance, fault and soak tests (PoC plan) |
 | [api-schema.md](api-schema.md) | The single API contract: conventions, auth, common objects, every endpoint's request and response fields, errors, behavior rules |
 | [implementation-pipeline.md](implementation-pipeline.md) | Three-stage build plan: data ingestion and preprocessing, model training, FastAPI endpoints (`/predict/ecg`, `/predict/eeg`, `/predict/radiation-risk`, `/predict/risk`), CORS, Pydantic, latency budget, build order |
+| [training-plan-v2.md](training-plan-v2.md) | Next training sessions on the CUNY HPCC cluster (SLURM): deep ECG, sleep and seizure models, data transfer, evaluation against the beta models, GPU-hour estimates, go/no-go, servable export and registration |
 | [fitness-assessment.md](fitness-assessment.md) | Fitness for purpose using established protocol metrics (event-based seizure scoring, Bland-Altman, ISO-style accuracy criteria, least significant change, calibration, decision curves) instead of a general loss value; gates per module and for the risk score |
 | [calibration-and-validation.md](calibration-and-validation.md) | How the numbers would be fitted and tested, targets, failure modes, governance |
 

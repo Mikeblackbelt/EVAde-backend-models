@@ -14,9 +14,9 @@
 | Missing value | `null`, never 0 or NaN; NaN and Infinity are rejected on input |
 | Numbers | floats rounded to 3 significant decimals in responses |
 | Identity | every request carries `user_id` (UUID4, pseudonymous), except `POST /v1/users` and `GET /v1/health`; `user_id` goes in the body for POST and the path or query for GET |
-| Auth | `Authorization: Bearer <token>`; hackathon: one shared service token plus `user_id`; target: per-user token issued by `POST /v1/users` and checked against the path or body `user_id` |
+| Auth | `X-EVAde-Key: <key>` on every request (health included), compared in constant time; hackathon: one shared service key (32+ characters, in Google Secret Manager) plus `user_id`, backend to backend only; target: per-user token issued by `POST /v1/users` and checked against the path or body `user_id` |
 | Idempotency | write calls accept an `Idempotency-Key` header; ingest deduplicates by (`device_id`, `seq`) |
-| CORS | explicit origin allow-list; no wildcard in production |
+| CORS | none: only our backend calls the service, never a browser |
 | Size limits | request body at most 1 MB; ingest batch at most 500 readings or 60 s of waveform; larger streams use `/ingest/stream` |
 | Rate limits | enforced at the edge and in the service; return `429` with `retry_after_s` |
 | Docs | OpenAPI generated from the models; every field has a description, unit, and range |

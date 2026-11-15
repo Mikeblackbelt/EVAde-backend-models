@@ -1,0 +1,22 @@
+# EVAde model service for Cloudflare Containers (see docs/cloudflare-containers-setup.md).
+# Containers have no volume mounts: at start the container pulls the model folders from the R2 models bucket with a
+# read-only key (scripts/fetch_models.py checks every sha256 in manifest.json), then serves.
+# Build on linux/amd64 (Cloudflare's requirement): wrangler deploy does this; elsewhere use docker build --platform linux/amd64.
+# Secrets (EVADE_API_KEY, CF_*) come from Worker secrets at runtime, never from the image.
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 EVADE_MODEL_DIR=/models
+WORKDIR /app
+COPY requirements.txt .
+# requirements.txt pins the model libraries and includes onnxruntime (CPU) for the ONNX deep models; boto3 for R2.
+# No torch: the deep models are served as ONNX, which keeps the image small and cold starts short.
+RUN pip install --no-cache-dir -r requirements.txt boto3==1.44.3
+COPY evade ./evade
+COPY scripts/fetch_models.py ./scripts/fetch_models.py
+RUN useradd --create-home --uid 10001 evade && mkdir -p /models && chown evade /models
+USER evade
+EXPOSE 8000
+# Forwarded headers come only from the Durable Object proxy inside Cloudflare; the container has no public address.
+ENV FORWARDED_ALLOW_IPS=*
+# ";" not "&&": a model folder that fails its checksum is skipped (listed as unavailable) and the API still starts.
+# --no-access-log: URL paths contain user IDs.
+CMD ["sh", "-c", "python scripts/fetch_models.py --dest /models; exec uvicorn evade.api.app:app --host 0.0.0.0 --port 8000 --proxy-headers --no-server-header --no-access-log"]
