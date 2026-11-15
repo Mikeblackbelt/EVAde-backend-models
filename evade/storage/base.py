@@ -150,9 +150,10 @@ class Storage:
         return {**counts, "blobs": blobs}
 
     # ---- users ----
-    def put_user(self, user_id: str, attrs: dict) -> None:
+    def put_user(self, user_id: str, attrs: dict, *, if_absent: bool = False) -> None:
+        """if_absent: insert only; an existing row is left exactly as it is (register-with-existing-ID path)."""
         if not self._gate(user_id):
-            self._put_user(user_id, attrs)
+            self._put_user(user_id, attrs, if_absent) if if_absent else self._put_user(user_id, attrs)
 
     def get_user(self, user_id: str) -> dict | None:
         return None if self.is_deleted(user_id) else self._get_user(user_id)
@@ -281,7 +282,7 @@ class Storage:
     # ---- to implement ----
     def _delete_user(self, user_id): raise NotImplementedError
     def _finish_delete(self, user_id): return None
-    def _put_user(self, user_id, attrs): raise NotImplementedError
+    def _put_user(self, user_id, attrs, if_absent=False): raise NotImplementedError
     def _get_user(self, user_id): raise NotImplementedError
     def _put_baselines(self, records): raise NotImplementedError
     def _get_baselines(self, user_id): raise NotImplementedError

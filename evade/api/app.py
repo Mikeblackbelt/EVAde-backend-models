@@ -652,11 +652,14 @@ def create_user(body: S.UserCreate):
             raise _user_deleted()
     if existing is not None:
         return envelope(uid, _user_out(uid, existing, False))     # attributes of an existing user are not changed
-    STATE.storage.put_user(uid, rec)             # tombstone-gated in storage (the D1 insert checks it too)
+    # insert-only (ON CONFLICT DO NOTHING): a concurrent create with the same ID cannot overwrite the first one's
+    # attributes; the stored row is read back so every caller sees the same user. Tombstone-gated in storage too.
+    STATE.storage.put_user(uid, rec, if_absent=True)
+    stored = (STATE.storage.get_user(uid) if STATE.storage.persistent else None) or rec
     with STATE.lock:
         if STATE.storage.is_deleted(uid, check_remote=False) or uid in STATE.pending_deletes:
             raise _user_deleted()                # a DELETE for this ID ran meanwhile: nothing is put back
-        cur = STATE.users.setdefault(uid, rec)   # a concurrent create with the same ID: both get the same user
+        cur = STATE.users.setdefault(uid, stored if stored.get("created_at") != rec["created_at"] else rec)
     STATE.missing.discard(uid)
     return envelope(uid, _user_out(uid, cur, cur is rec))
 

@@ -135,3 +135,15 @@ def test_incomplete_deletion_blocks_reregistration_and_is_retried(api_cf):
     assert fake.count("users", uid) == 0
     assert client.delete(f"/v1/users/{uid}", headers=H).status_code == 404
     assert create(client, uid).status_code == 409
+
+
+@pytest.mark.parametrize("kind", ["memory", "cloudflare"])
+def test_insert_only_create_never_overwrites_an_existing_row(kind):
+    """Two creates racing for the same caller-chosen ID: the first row's attributes stay (insert-only)."""
+    from evade.storage.memory import MemoryBackend
+    st = MemoryBackend() if kind == "memory" else cf_backend()[0]
+    uid = new_id()
+    st.put_user(uid, {"created_at": 1.0, "cohort": "first"}, if_absent=True)
+    st.put_user(uid, {"created_at": 2.0, "cohort": "second"}, if_absent=True)
+    got = st.get_user(uid)
+    assert got["cohort"] == "first" and got["created_at"] == 1.0

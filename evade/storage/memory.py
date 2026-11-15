@@ -54,8 +54,10 @@ class MemoryBackend(Storage):
             n["devices"] = len(devs)
             return n
 
-    def _put_user(self, user_id, attrs):
+    def _put_user(self, user_id, attrs, if_absent=False):
         with self._lock:
+            if if_absent and user_id in self.users:
+                return
             self.users[user_id] = copy.deepcopy(attrs)
 
     def _get_user(self, user_id):
