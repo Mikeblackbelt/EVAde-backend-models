@@ -48,7 +48,8 @@ def http_get_json(url: str, timeout: float = 8.0, max_bytes: int = 8_000_000) ->
     if len(body) > max_bytes:
         raise ProviderUnavailable("response too large")
     try:
-        return json.loads(body)
+        # SWPC sometimes serves a file with trailing NUL padding (seen 2026-11-15 while a feed was being rewritten)
+        return json.loads(body.rstrip(b"\x00 \t\r\n"))
     except ValueError as e:
         raise ProviderUnavailable("response is not JSON") from e
 
@@ -107,7 +108,7 @@ class NoaaSwpcProvider(SpaceWeatherProvider):
 
         protons = get("protons", f"/json/goes/primary/integral-protons-{span}.json")
         if not protons:
-            raise ProviderUnavailable("NOAA SWPC proton feed unavailable or empty")
+            raise ProviderUnavailable(f"NOAA SWPC proton feed unavailable or empty ({meta['feeds'].get('protons')})")
         sats = set()
         for r in protons:
             name = self.PROTON_ENERGY.get(str(r.get("energy", "")).replace(" ", "").replace("MeV", " MeV"))

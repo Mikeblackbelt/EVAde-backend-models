@@ -116,6 +116,20 @@ def test_http_rejects_other_hosts_without_network():
         P.http_get_json("http://services.swpc.noaa.gov/json/x.json")      # https only
 
 
+def test_http_tolerates_nul_padding(monkeypatch):
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return b'[{"time_tag": "2026-11-15T01:30:00Z", "flux": 0.2, "energy": ">=10 MeV"}]' + b"\x00" * 50
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: Resp())
+    assert P.http_get_json("https://services.swpc.noaa.gov/json/goes/primary/integral-protons-3-day.json")[0]["flux"] == 0.2
+
+
 def test_cache_ttl_and_failure_caching():
     class Inner(P.SpaceWeatherProvider):
         name = "inner"
@@ -259,6 +273,17 @@ def test_latest_features_bounded_by_time_span():
     row, cov = latest_features(Observations("x", far))
     assert _t.perf_counter() - t0 < 1.0
     assert cov["hours"] <= LOOKBACK_H + 1 and row["lp10"] == pytest.approx(np.log10(0.6))
+
+
+def test_latest_features_anchor_to_protons_across_hour_boundary():
+    hh = pd.Timestamp("2026-11-14T10:00Z")
+    recs = [Record.make((hh - pd.Timedelta(minutes=5 * k)).to_pydatetime() + timedelta(minutes=55), proton_10mev_pfu=0.3)
+            for k in range(700)]                                       # protons end at 10:55
+    recs += [Record.make((hh + pd.Timedelta(hours=1, minutes=2) - pd.Timedelta(minutes=k)).to_pydatetime(),
+                         xray_long_wm2=1e-6) for k in range(3000)]    # X-rays end at 11:02
+    row, cov = latest_features(Observations("lag", recs))
+    assert row is not None and cov["feature_hour_utc"] == hh.isoformat()
+    assert cov["proton_hours"] == LOOKBACK_H + 1
 
 
 def test_labels_onset_task():

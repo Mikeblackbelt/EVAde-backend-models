@@ -107,7 +107,11 @@ def latest_features(obs: Observations, now: pd.Timestamp | None = None) -> tuple
     df = records_frame(obs)
     if df.empty or "proton_10mev_pfu" not in df.columns:
         return None, {"reason": "no proton data"}
-    end = now if now is not None else df.index.max()
+    # anchor to the newest proton sample: protons lag the 1-min X-ray and solar wind feeds by ~10 min, and anchoring
+    # to the newest record of any field would leave the last hour without protons just after every hour boundary
+    end = now if now is not None else df["proton_10mev_pfu"].dropna().index.max()
+    if end is pd.NaT or end is None:
+        return None, {"reason": "no proton data"}
     # bound the work by time, not only by record count: two records years apart must not build a huge hourly grid
     df = df[(df.index >= end.floor("1h") - pd.Timedelta(hours=LOOKBACK_H + 2)) & (df.index <= end)]
     if df.empty or df["proton_10mev_pfu"].notna().sum() == 0:

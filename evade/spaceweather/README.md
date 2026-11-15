@@ -64,7 +64,7 @@ NOAA scales (standard thresholds): S1-S5 at >=10 MeV flux 10, 100, 1e3, 1e4, 1e5
 
 - **Task:** at an hour when the hourly mean >=10 MeV flux is below 10 pfu, will it reach 10 pfu in any of the next 24 hours (SPE onset)? The hourly mean stands in for NOAA's three-point rule. During an event the endpoint returns `event_in_progress`, not a probability.
 - **Data:** NOAA NCEI GOES SEM 5-min averages, 1998-2019 (`scripts/download_goes_history.sh`): integral protons (GOES-8..12 EPS `p3/p5/p7_flux_ic`; GOES-13/15 EPEAD corrected `ZPGT10/50/100`, mean of the E and W detectors that pass QC) and XRS (5-min for GOES-8..12, 1-min for GOES-13/15; per month the satellite with the most valid hours, gaps filled from the others; divided by 0.7 to undo the SWPC scaling, so values match GOES-R true irradiance).
-- **Features (19, `features.py`, the same code for training and serving):** log flux at >=10/50/100 MeV, 24 h max and 48 h min of log >=10 MeV flux, its 1/3/6 h changes, spectral hardness (50/10, 100/10), log X-ray flux now and its max over 3/6/24/48 h, 24 h X-ray fluence, counts of M- and X-class hours in 48 h, hours since the last M-class hour (capped at 48). A test checks that features from a 22-year history and from the trailing 49 hours are identical.
+- **Features (19, `features.py`, the same code for training and serving):** log flux at >=10/50/100 MeV, 24 h max and 48 h min of log >=10 MeV flux, its 1/3/6 h changes, spectral hardness (50/10, 100/10), log X-ray flux now and its max over 3/6/24/48 h, 24 h X-ray fluence, counts of M- and X-class hours in 48 h, hours since the last M-class hour (capped at 48). A test checks that features computed over a long history (200 synthetic hours) and over only the trailing 49 hours are identical. At serving time, the feature hour is anchored to the newest proton sample, because protons lag the 1-min X-ray feed by about 10 minutes.
 - **Splits (no leakage across storms):** protocol A, time-forward: train 1998-2010, Platt recalibration 2011-2012, test 2013-2019, with a 72 h embargo (48 h lookback + 24 h horizon) at every boundary. Logistic vs gradient boosting was chosen by blocked CV inside 1998-2012 only. Protocol B: leave-one-block-out over 9 contiguous blocks with the same embargo (robustness). Baselines: climatology (the training base rate) and persistence (logistic on the current log flux only). CIs come from a 27-day block bootstrap.
 
 ### Results (2026-11-14, commit a99b862, draft)
@@ -88,7 +88,7 @@ Reliability (test): the model **over-forecasts by about 2x** in the 0.01-0.5 ran
 
 **Protocol B, leave-one-block-out over 9 blocks (1998-2019, pooled out-of-fold):** model Brier 0.0121, AUROC 0.909; persistence 0.0128 and 0.715; per-fold climatology 0.0141.
 
-Honest reading: discrimination is clearly better than persistence (AUROC 0.92 vs 0.71, CIs barely overlap). The Brier gain over persistence and climatology is small and its CI includes zero, because there are only 15 test onsets. Probabilities are too high in a quiet solar cycle. Use the output as a ranked "watch" signal for human review, not as a calibrated probability.
+Honest reading: discrimination is clearly better than persistence (AUROC 0.92 vs 0.71; the CIs do not overlap). The Brier gain over persistence and climatology is small and its CI includes zero, because there are only 15 test onsets. Probabilities are too high in a quiet solar cycle. Use the output as a ranked "watch" signal for human review, not as a calibrated probability.
 
 ## (c) Crew dose-rate estimate
 
@@ -125,6 +125,7 @@ On the shared server, run it through `guarded_job.sh` (4 threads, 8 GB and 1 h a
 ## Limits
 
 - Trained on GOES-8..15 (to 2019). The live feed is GOES-16/18/19 (SGPS and XRS on GOES-R), which are different instruments. Proton fluxes are designed to be comparable but are not identical; X-rays are put on the same scale by undoing the 0.7 factor. The 5-min XRS of GOES-8..12 slightly lowers hourly peaks compared with 1-min data.
-- Proton satellites change over the record (GOES-8, 10, 11, 13, 15), so the background levels shift slightly.
+- **Quiet-time proton backgrounds differ between instruments.** Live GOES-18 on 2026-11-15 read 0.20 / 0.18 / 0.17 pfu at >=10 / 50 / 100 MeV. One GOES-15 sample from March 2012 read about 0.22 / 0.06 / 0.025. So in quiet conditions, `lp50`, `lp100` and the two hardness features sit outside most of the training distribution. Event-time fluxes are far above these backgrounds, but quiet-time probabilities from the live feed carry this offset. A per-instrument background correction is future work.
+- Proton satellites change over the training record too (GOES-8, 10, 11, 13, 15). GOES-15 had no CSV files for 2010-05 to 2010-08, so GOES-13 protons fill those months.
 - SPE onsets are rare (tens of independent events in the test period), so the CIs are wide. The forecast uses only GOES proton and X-ray history: no CME, radio burst or active-region information, which operational forecasters use.
 - The dose estimate is a parameterized demo, not a radiation transport calculation.
