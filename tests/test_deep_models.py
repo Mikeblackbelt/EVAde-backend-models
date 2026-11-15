@@ -537,6 +537,6 @@ def test_ecg_deep_input_bounds(mock_registry):
         EcgAdapter.to_record(np.zeros((65, 1000)), 100.0, 100.0, 1000, np.zeros(65))
     uid = new_user()
     r = post("/v1/predict/ecg-deep", ecg_body(uid, fs=99.7))   # 1000/997 needs factors over 100: refused, also in mock
-    assert _err(r) == (422, "bad_shape") and r.json()["error"]["field"] == "fs_hz"
+    assert _err(r) == (422, "bad_shape") and r.json()["error"]["field"] == "fs_hz" and "99.7" not in r.text
     assert _err(post("/v1/predict/ecg-deep", ecg_body(uid, fs=40.0))) == (422, "validation_error")
     assert post("/v1/predict/ecg-deep", ecg_body(uid, fs=500.0)).status_code == 200

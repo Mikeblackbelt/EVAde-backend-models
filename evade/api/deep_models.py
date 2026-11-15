@@ -231,8 +231,9 @@ def build_router() -> APIRouter:
         e = registry().get("ecg_deep")
         try:                                     # same bound in mock mode, so a client never sees it change later
             ecg_resample_ratio(body.fs_hz, e.spec["fs"] if e.available else ECG_FS)
-        except ValueError as ex:
-            raise A.err(422, "bad_shape", str(ex), "fs_hz") from None
+        except ValueError:                       # fixed message: errors never echo submitted values
+            raise A.err(422, "bad_shape", "fs_hz cannot be resampled to the model rate with polyphase factors of at "
+                        "most 100; use a common rate such as 100, 125, 200, 250, 500 or 1000 Hz", "fs_hz") from None
         ad, x = ADAPTERS["ecg_deep"], body.canonical()
         core = ad.predict(e.spec, e.runner, x, body.fs_hz) if e.available else ad.mock(x, body.fs_hz)
         data = {**header("ecg_deep", e), **core,

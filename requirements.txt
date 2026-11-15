@@ -1,7 +1,8 @@
 # Runtime dependencies of the API and the training code. Test-only packages are in requirements-dev.txt.
-# Pinned: the libraries that load or reproduce the trained models. The beta joblib models (EVA-2, EVA-6, space
-# weather) are unpickled with scikit-learn/numpy/joblib, which must match the versions they were trained with, and
-# the deep ECG model (EVA-13, ONNX) was trained on the cluster with the same numpy and scikit-learn versions.
+# Pinned: the libraries that unpickle or reproduce the trained models. numpy and scikit-learn match the cluster venv
+# that trained the deep ECG model (EVA-13); joblib and scipy match the local test venv. The beta joblib models (EVA-2,
+# EVA-6, space weather) were trained on the lab server, whose versions are not recorded here: compare them with
+# these pins before serving those models (a mismatch can fail to unpickle or change the outputs).
 numpy==2.5.4
 scipy==1.18.1
 scikit-learn==1.9.1
