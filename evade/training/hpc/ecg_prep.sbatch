@@ -14,7 +14,9 @@
 
 set -euo pipefail
 PROJECT=/scratch/$USER/evade
-PY=${EVADE_PY:-/scratch/$USER/tusz_v2/venv/bin/python}
+PY=${EVADE_PY:-$PROJECT/venv/bin/python}
+# the venv uses a self-contained Python installed with uv under $PROJECT/python (compute nodes lack the login
+# node's /usr/bin/python3.12, and the cluster Python modules miss _ctypes/_bz2); no module load needed
 export PYTHONPATH=$PROJECT/code:$PROJECT/pylib
 RAW=$PROJECT/data/raw
 OUT=$PROJECT/data/ptbxl100
