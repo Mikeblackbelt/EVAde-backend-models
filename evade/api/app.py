@@ -7,10 +7,13 @@ Env:
                        Every request, /v1/health and unknown paths included, must send it in the X-EVAde-Key header.
   EVADE_ENABLE_DOCS    "1" to serve /docs, /redoc and /openapi.json (still behind the key); off by default
   EVADE_REQUIRE_HTTPS  "1" to reject requests whose X-Forwarded-Proto is not https (TLS ends at Cloud Run/Cloudflare)
-  EVADE_MODEL_DIR      folder of model folders <task>/manifest.json (evade/models/README.md); optional
+  EVADE_MODEL_DIR      folder of model folders <task>/manifest.json (evade/models/README.md), plus spaceweather/
+                       (its own sha256-checked loader, evade/spaceweather/model.py); optional
   EVADE_ALLOW_DRAFT    "1" to serve draft (beta) models; they are labelled draft in every response
   EVADE_STORAGE        memory (default, state lost on restart) or cloudflare (D1 + R2; see evade/storage)
   EVADE_STORAGE_DEADLINE_S  per-request time budget for storage calls (default 8); /v1/health never touches storage
+  EVADE_SPACEWX_REPLAY_FILE      normalized space-weather JSON for provider "replay" (optional)
+  EVADE_SPACEWX_DISABLE_NETWORK  "1" disables the NOAA SWPC provider (offline demos, tests)
 Backend-to-backend only: no CORS, so browsers cannot call it. Logs never contain request bodies, signal values,
 self-report answers, user IDs or header values; uvicorn's access log (which has URL paths) must be off.
 Outputs are flags for human review, never diagnoses.
@@ -48,8 +51,13 @@ from ..preprocessing.ecg import detect_qrs, hrv_features, preprocess_ecg
 from ..preprocessing.eeg import bipolar_from_monopolar, preprocess_eeg, select_bipolar
 from ..preprocessing.signal import make_windows, signal_quality
 from ..risk.engine import DomainInput, mdtr, radiation_domain, risk
+from ..spaceweather import model as SW
+from ..spaceweather.model import load_forecaster
+from ..spaceweather.providers import ProviderUnavailable, cmes_frame, get_provider
+from ..spaceweather.schema import Observations, Record
 from ..training.features import EEG_BANDS, ecg_features, spectral_features
 from . import schemas as S
+from .deep_models import DEEP_TASKS, build_router as build_deep_router, deep_listing
 
 API_VERSION = "0.1.0-beta"
 MAX_BODY = 1_000_000
@@ -165,6 +173,23 @@ class State:
         # manifests are validated and sha256-checked before loading; bad folders are listed as unavailable
         self.registry = ModelRegistry.from_env()
         self.models = self.registry.served()       # task -> {model, features, metrics, model_id, status, manifest}
+        sw = load_spaceweather()
+        if sw:
+            self.models["spaceweather"] = sw
+
+
+def load_spaceweather() -> dict | None:
+    """The space-weather forecaster has its own folder layout (<EVADE_MODEL_DIR>/spaceweather/, manifest with a sha256
+    per file), so the manifest registry does not load it. Draft only, so it needs EVADE_ALLOW_DRAFT=1. A hash mismatch
+    or unreadable folder leaves the nowcast and dose estimate running without the forecast."""
+    root = os.environ.get("EVADE_MODEL_DIR")
+    if not root or os.environ.get("EVADE_ALLOW_DRAFT") != "1":
+        return None
+    try:
+        return load_forecaster(root)            # verifies the manifest sha256 on the bytes it then unpickles
+    except Exception as e:                      # noqa: BLE001 - one bad folder must not stop the service
+        log.warning("spaceweather model folder unavailable: %s", type(e).__name__)
+        return None
 
 
 _DOCS = os.environ.get("EVADE_ENABLE_DOCS") == "1"      # off by default; behind the key like every path when on
@@ -569,6 +594,8 @@ async def health():               # async: never queued behind a threadpool busy
 def models():
     rows = []
     for task, m in STATE.models.items():
+        if task in DEEP_TASKS:                   # listed once, under deep_models
+            continue
         man = m.get("manifest") or {}
         verified = bool(m.get("sha256_verified"))
         rows.append({"task": task, "model_id": m["model_id"], "status": m["status"], "available": True,
@@ -577,27 +604,64 @@ def models():
                      "headline": headline(task, m), "format": man.get("format"), "input": man.get("input"),
                      "output": man.get("output"), "code_commit": man.get("code_commit"),
                      "trained_at": man.get("trained_at"), "data": man.get("data")})
-    unavailable = [e for e in STATE.registry.listing() if not e["available"] and e["task"] not in STATE.models]
-    return envelope(None, {"models": rows, "unavailable": unavailable,
+    # spaceweather/ is loaded by load_spaceweather (its manifest predates the registry contract): once loaded it is
+    # in STATE.models and drops out of this list; if it did not load, the registry's entry says it is unavailable
+    unavailable = [e for e in STATE.registry.listing() if not e["available"] and e["task"] not in STATE.models
+                   and e["task"] not in DEEP_TASKS]
+    return envelope(None, {"models": rows, "unavailable": unavailable, "deep_models": deep_listing(),
                            "draft_served": os.environ.get("EVADE_ALLOW_DRAFT") == "1",
-                           "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison"]})
+                           "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison",
+                                          "space-weather nowcast (NOAA scales) and dose-rate estimate (assumptions)"]})
 
 
 def headline(task: str, m: dict) -> dict:
     return (m.get("manifest") or {}).get("headline") or headline_from_metrics(task, m.get("metrics") or {})
 
 
+def _user_out(uid: str, rec: dict, created: bool) -> dict:
+    return {"user_id": uid, "created": created,
+            "created_at": datetime.fromtimestamp(float(rec.get("created_at") or time.time()), timezone.utc).isoformat()}
+
+
+def _user_deleted() -> HTTPException:
+    return err(409, "user_deleted", "this user_id was deleted and cannot be registered again", "user_id")
+
+
 @app.post("/v1/users")
 def create_user(body: S.UserCreate):
-    uid = str(uuid.uuid4())
     rec = {"created_at": time.time(), "cohort": body.cohort, "age_band": body.age_band, "sex": body.sex}
-    # persisted first: a 503 here leaves no half-created user in memory. If the row commits but the response is lost,
-    # the client retries and gets a new user; the first row is an orphan nobody holds the ID of, with only created_at
-    # and the coarse attributes above (no health data). Accepted for the beta (see the README).
-    STATE.storage.put_user(uid, rec)
+    uid = body.user_id
+    if uid is None:
+        uid = str(uuid.uuid4())
+        # persisted first: a 503 here leaves no half-created user in memory. If the row commits but the response is
+        # lost, the client retries and gets a new user; the first row is an orphan nobody holds the ID of, with only
+        # created_at and the coarse attributes above (no health data). Accepted for the beta (see the README). Send
+        # user_id to make the call idempotent instead.
+        STATE.storage.put_user(uid, rec)
+        with STATE.lock:
+            STATE.users[uid] = rec
+        return envelope(uid, _user_out(uid, rec, True))
+    # register under a caller-chosen ID: idempotent, and a deleted (tombstoned) ID is never brought back
+    if uid in STATE.pending_deletes or STATE.storage.is_deleted(uid):
+        raise _user_deleted()
+    existing = STATE.users.get(uid)
+    if existing is None and STATE.storage.persistent:
+        STATE.missing.discard(uid)               # a cached miss must not hide a row another instance wrote
+        existing = hydrate(uid)
+        if existing is None and STATE.storage.is_deleted(uid):    # deleted between the checks
+            raise _user_deleted()
+    if existing is not None:
+        return envelope(uid, _user_out(uid, existing, False))     # attributes of an existing user are not changed
+    # insert-only (ON CONFLICT DO NOTHING): a concurrent create with the same ID cannot overwrite the first one's
+    # attributes; the stored row is read back so every caller sees the same user. Tombstone-gated in storage too.
+    STATE.storage.put_user(uid, rec, if_absent=True)
+    stored = (STATE.storage.get_user(uid) if STATE.storage.persistent else None) or rec
     with STATE.lock:
-        STATE.users[uid] = rec
-    return envelope(uid, {"user_id": uid, "created_at": datetime.now(timezone.utc).isoformat()})
+        if STATE.storage.is_deleted(uid, check_remote=False) or uid in STATE.pending_deletes:
+            raise _user_deleted()                # a DELETE for this ID ran meanwhile: nothing is put back
+        cur = STATE.users.setdefault(uid, stored if stored.get("created_at") != rec["created_at"] else rec)
+    STATE.missing.discard(uid)
+    return envelope(uid, _user_out(uid, cur, cur is rec))
 
 
 @app.delete("/v1/users/{user_id}")
@@ -814,6 +878,64 @@ def predict_radiation(body: S.RadiationRequest):
                                    "spe_override": o5, "rule_version": "risk-score.md v2"})
 
 
+SPACEWX_HOURS = 72      # the forecast features need 48 h; the NOAA 3-day feeds cover it
+
+
+@app.post("/v1/predict/space-weather")      # the key is checked by the global middleware
+def predict_space_weather(body: S.SpaceWeatherRequest):
+    """Nowcast (NOAA S/R/G scales, SPE flag), SPE onset probability (draft model), dose-rate estimate, and the inputs
+    for /v1/predict/radiation-risk. Nothing is stored and no override is raised: O5 is returned as a candidate."""
+    user(body.user_id)
+    if body.observations is not None:
+        obs = Observations("request", [Record.make(o.t_utc, **o.model_dump(exclude={"t_utc"}, exclude_none=True))
+                                       for o in body.observations],
+                           meta={"background_prefix": "swpc:" if body.proton_source == "swpc_operational" else ""})
+    else:
+        try:
+            obs = get_provider(body.provider).fetch(SPACEWX_HOURS)
+        except ProviderUnavailable as e:
+            raise err(503, "provider_unavailable", f"space-weather provider '{body.provider}' unavailable: {e}", "provider")
+    if not obs.has("proton_10mev_pfu"):
+        raise err(422, "validation_error", "observations need at least one proton_10mev_pfu value", "observations")
+    events, donki_warn, donki_src = None, [], None
+    if body.observations is not None and body.cmes is not None:
+        events = {"cme": [{"t_utc": c.t_utc.isoformat(), "speed_kms": c.speed_kms, "half_angle_deg": c.half_angle_deg,
+                           "width_deg": 2 * c.half_angle_deg if c.half_angle_deg is not None else None,
+                           "earth_directed": c.earth_directed} for c in body.cmes]}
+        donki_src = "request"
+    elif body.provider is not None and body.include_donki:
+        try:
+            d = get_provider("donki").fetch(96)
+            events, donki_warn, donki_src = d.meta.get("events"), d.warnings, d.meta.get("donki_sources")
+        except ProviderUnavailable as e:
+            donki_warn = [f"DONKI unavailable: {e}"]
+    nc = SW.nowcast(obs)
+    fc = SW.forecast(STATE.models.get("spaceweather"), obs, nc, cmes=cmes_frame(events))
+    dose = SW.dose_estimate(obs, body.location, body.shielding, body.measured_dose_rate_usv_h)
+    rin = SW.radiation_inputs(dose, body.cumulative_dose_msv, body.seu_count_last_hour)
+    data = {"nowcast": nc, "forecast": fc, "dose": dose, "radiation_inputs": rin, "o5": SW.o5_candidate(dose),
+            "donki": {"summary": SW.donki_summary(events), "source": donki_src},
+            "assumptions": SW.ASSUMPTIONS,
+            "source": {"name": obs.source, "fetched_at": obs.fetched_at.isoformat(), "records": len(obs.records),
+                       "warnings": obs.warnings, "meta": obs.meta},
+            "note": "flags and estimates for human review, not dosimetry; forward radiation_inputs to "
+                    "/v1/predict/radiation-risk to update the radiation domain"}
+    if body.cumulative_dose_msv is not None:
+        di, parts = radiation_domain(body.cumulative_dose_msv, rin["spe_dose_msv"], rin["rate_ratio_to_7d_median"],
+                                     body.seu_count_last_hour)
+        rate = rin["dose_equivalent_rate_msv_per_day"]
+        t_rad = (600 - body.cumulative_dose_msv - 25) / rate if rate > 0 else None
+        data["radiation_domain_preview"] = {"s": round(di.s, 3), "components": parts,
+                                            "confidence": "low_confidence" if di.q < 0.5 else "ok",
+                                            "t_rad_days": round(max(t_rad, 0.0), 1) if t_rad is not None else None,
+                                            "rule_version": "risk-score.md v2"}
+    ids = [fc["model_id"]] if fc.get("model_id") else []
+    warn = nc["warnings"] + fc.get("warnings", []) + obs.warnings + donki_warn + (["draft model output"] if ids else [])
+    if dose["source"] == "estimated":
+        warn.append("dose rate is a model estimate from assumptions, not a measurement")
+    return envelope(body.user_id, data, ids, warn)
+
+
 @app.post("/v1/predict/risk")
 def predict_risk(body: S.RiskRequest):
     user(body.user_id)
@@ -1005,3 +1127,6 @@ def ingest_batch(body: S.IngestBatch):
                                    "comparison_summary": {"n": len(comps), "n_flagged": len(flagged),
                                                           "levels": sorted({c["level"] for c in comps})},
                                    "alerts": alerts_for(comps)}, warnings=warn)
+
+
+app.include_router(build_deep_router())         # deep model endpoints (evade/api/deep_models.py); the middleware checks the key

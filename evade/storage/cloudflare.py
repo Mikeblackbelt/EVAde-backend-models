@@ -401,11 +401,12 @@ class CloudflareBackend(Storage):
         return bool(self.d1.query("SELECT 1 AS x FROM pending_deletions WHERE user_hash = ?", [user_hash(user_id)]))
 
     # ---- users ----
-    def _put_user(self, user_id, attrs):
+    def _put_user(self, user_id, attrs, if_absent=False):
         a = dict(attrs)
         created = float(a.pop("created_at", time.time()))
+        conflict = "DO NOTHING" if if_absent else "DO UPDATE SET attrs = excluded.attrs"
         self._write([("INSERT INTO users (user_id, created_at, attrs) SELECT ?, ?, ? "
-                      f"WHERE {NOT_TOMB} ON CONFLICT (user_id) DO UPDATE SET attrs = excluded.attrs",
+                      f"WHERE {NOT_TOMB} ON CONFLICT (user_id) {conflict}",
                       [user_id, created, _dumps(a), user_hash(user_id)])])
 
     @staticmethod

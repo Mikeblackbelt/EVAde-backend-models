@@ -1,16 +1,20 @@
-numpy
-scipy
+# Runtime dependencies of the API and the training code. Test-only packages are in requirements-dev.txt.
+# Pinned: the libraries that unpickle or reproduce the trained models. numpy and scikit-learn match the cluster venv
+# that trained the deep ECG model (EVA-13); joblib and scipy match the local test venv. The beta joblib models (EVA-2,
+# EVA-6, space weather) were trained on the lab server, whose versions are not recorded here: compare them with
+# these pins before serving those models (a mismatch can fail to unpickle or change the outputs).
+numpy==2.5.4
+scipy==1.18.1
+scikit-learn==1.9.1
+joblib==1.6.0
 pandas
 pyarrow
 wfdb
 pyedflib
-pytest
-scikit-learn
-joblib
 fastapi
 uvicorn
-httpx
+httpx               # D1 REST client (EVADE_STORAGE=cloudflare); also used by the test client
+onnxruntime         # deep ECG model (ecg_deep, format=onnx)
 # Optional, install only what the deployment uses:
 #   boto3        R2 blob storage (EVADE_STORAGE=cloudflare with CF_R2_*) and scripts/fetch_models.py
-#   onnxruntime  serve model folders with format=onnx
-#   torch        serve model folders with format=torchscript
+#   torch        serve model folders with format=torchscript, and the deep training code

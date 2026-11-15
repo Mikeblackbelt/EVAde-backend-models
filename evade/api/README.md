@@ -7,8 +7,11 @@ FastAPI service for the hackathon-minimum subset of [api-schema.md](../../lit%20
 ```
 pip install -r requirements.txt
 export EVADE_API_KEY=<shared key, at least 32 characters>   # required; the service refuses to start without it
-export EVADE_MODEL_DIR=<folder of <task>/manifest.json model folders>   # optional; see evade/models/README.md
+export EVADE_MODEL_DIR=<folder of <task>/manifest.json model folders, plus spaceweather/>   # optional; see evade/models/README.md
 export EVADE_ALLOW_DRAFT=1                         # serve the beta (draft) models, labelled draft
+export EVADE_SPACEWX_REPLAY_FILE=<storm.json>       # optional: enables provider "replay" (normalized JSON)
+export EVADE_SPACEWX_DISABLE_NETWORK=1             # optional: no NOAA or DONKI provider (offline demos, tests)
+export NASA_API_KEY=<key>                          # optional: DONKI via api.nasa.gov when CCMC is down (else DEMO_KEY)
 uvicorn evade.api.app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
@@ -52,8 +55,8 @@ gcloud run deploy evade-api --image <image> --region <region> \
 | Endpoint | What it does |
 |---|---|
 | `GET /v1/health` | liveness and which models loaded (key required); never touches storage, so it answers during a D1 outage |
-| `GET /v1/models` | served models from their manifests (`EVA-[n]`, status, format, input and output spec, headline metrics, commit, data, `integrity`: `sha256_verified` or `unverified` for a legacy folder without a pinned hash), plus `unavailable` folders with a generic `reason_code` and `reason` (`draft_not_allowed`, `sha256_mismatch`, `runtime_missing`, `manifest_invalid`, ...; details only in the server log) |
-| `POST /v1/users`, `DELETE /v1/users/{id}` | create a pseudonymous user (UUID); delete all of their data, including D1 rows and R2 objects with Cloudflare storage. Returns 503 `deletion_incomplete` if storage fails; the DELETE can be retried, also after a restart, until it returns 200. A completed deletion then gives 404 |
+| `GET /v1/models` | served models from their manifests (`EVA-[n]`, status, format, input and output spec, headline metrics, commit, data, `integrity`: `sha256_verified` or `unverified` for a legacy folder without a pinned hash), plus `unavailable` folders with a generic `reason_code` and `reason` (`draft_not_allowed`, `sha256_mismatch`, `runtime_missing`, `manifest_invalid`, ...; details only in the server log), and `deep_models`: each deep task's state (`mock`, `available` or `unavailable` with a reason) |
+| `POST /v1/users`, `DELETE /v1/users/{id}` | create a pseudonymous user (a server-generated UUID, or the caller's own `user_id`: idempotent, 409 `user_deleted` for a deleted ID; see [Worker integration](#worker-integration)); delete all of their data, including D1 rows and R2 objects with Cloudflare storage. Returns 503 `deletion_incomplete` if storage fails; the DELETE can be retried, also after a restart, until it returns 200. A completed deletion then gives 404 |
 | `POST /v1/baseline/{modality}` | add ECG or EEG windows, or readings, to the user's baseline; locks after the minimum count (demo: 30 windows) |
 | `POST /v1/baseline/{modality}/confirm`, `/reset` | confirm a provisional baseline; archive and start over |
 | `GET /v1/users/{id}/baseline` | baselines with center, spread, count, status |
@@ -61,12 +64,14 @@ gcloud run deploy evade-api --image <image> --region <region> \
 | `POST /v1/predict/ecg` | HR and HRV, quality, rule-based rhythm backstop, baseline comparison; for a 12-lead 10 s window at 100 Hz also the beta PTB-XL superclass probabilities (EVA-6) |
 | `POST /v1/predict/eeg` | quality, band-power ratios, baseline comparison; with the model loaded, a seizure-suspect flag from the beta model (EVA-2), which never raises override O4 on its own |
 | `POST /v1/predict/radiation-risk` | radiation domain score from the risk-score anchors, time to the career limit, solar particle event override O5 |
+| `POST /v1/predict/space-weather` | from a server-side provider (`noaa_swpc`, or `replay` if configured) or posted observations: NOAA S/R/G nowcast, SPE-in-progress flag, P(SPE onset within 24 h) from the draft model (EVA-12, if loaded), NASA DONKI context (CMEs, flares, shocks, SEPs; a DONKI outage is only a warning), crew dose-rate estimate, the matching `/v1/predict/radiation-risk` inputs, and O5 as a candidate only; 503 `provider_unavailable` if the feed is down. See [spaceweather README](../spaceweather/README.md) |
 | `POST /v1/predict/risk` | risk score R (v2), band, flag, overrides, and maximum days to return (MDTR) with driver; MDTR is withheld without `logistics_floor_days` |
 | `POST /v1/input/self-report` | 1-5 ratings compared with the user's own baseline |
 | `POST /v1/input/instrument` | PHQ-9 or GAD-7 score and band; PHQ-9 item 9 above 0 raises override O1 (clinician contact) |
 | `POST /v1/devices/bind`, `GET`/`DELETE /v1/devices/{id}?user_id=` | bind a Bluetooth device to one user (409 if bound to another), status, unbind (also removes a stored binding this process has not loaded, only for its owner) |
 | `POST /v1/ingest/batch` | readings or windows from a bound device with a per-device `seq`; duplicates ignored, gaps counted, results compared with the baseline |
 | `GET /v1/actions?user_id=` | action text for current flags (draft wording, to be reviewed) |
+| `POST /v1/predict/ecg-deep`, `/sleep-deep`, `/seizure-deep`, `POST /v1/models/reload` | deep models. Until their weights exist they return placeholder outputs (`source: "mock"`, `model_id: null`) in the final schema; they switch to the model when its folder appears. See [README_deep_models.md](README_deep_models.md) |
 
 ## Example
 
@@ -77,6 +82,50 @@ curl -s -X POST localhost:8000/v1/predict/risk -H "X-EVAde-Key: $EVADE_API_KEY" 
      -H "Content-Type: application/json" \
      -d '{"user_id": "<id>", "domain_inputs": {"behavioral": {"s": 0.65}, "radiation": {"s": 0.4}}, "logistics_floor_days": 0.5}'
 ```
+
+## Worker integration
+
+The team's backend Worker is the only caller. It sends `X-EVAde-Key` from a Worker secret on every call, and uses the team's own `users.user_id` (a lowercase UUID) as the EVAde `user_id`.
+
+**Register a user** when the team creates one, or lazily before its first call:
+
+```
+curl -s -X POST $EVADE_API_URL/v1/users -H "X-EVAde-Key: $EVADE_API_KEY" -H "Content-Type: application/json" \
+     -d '{"consent": true, "user_id": "3f2b8c1e-7a4d-4e8b-9c3f-2d1e0a9b8c7d"}'
+```
+
+| Case | Response |
+|---|---|
+| unknown ID | 200, `data: {"user_id", "created": true, "created_at"}`; the user is created with that ID |
+| ID already registered | 200, the existing user with `"created": false` (idempotent: retry freely; the attributes sent are ignored) |
+| ID was deleted | 409 `user_deleted`: a deleted user is never brought back. Don't retry |
+| no `user_id` | 200, a server-generated UUID (unchanged behaviour) |
+| malformed ID (not a lowercase UUID) | 422 `validation_error`, `field: "user_id"` |
+
+**Delete a user** when the team deletes theirs:
+
+```
+curl -s -X DELETE $EVADE_API_URL/v1/users/3f2b8c1e-7a4d-4e8b-9c3f-2d1e0a9b8c7d -H "X-EVAde-Key: $EVADE_API_KEY"
+```
+
+| Case | Response |
+|---|---|
+| first delete | 200, `data: {"deleted": true, "storage": "memory" or "cloudflare", "blobs_removed": <n>}` |
+| unknown or already deleted ID | 404 `user_not_found` |
+| storage failed part-way | 503 `deletion_incomplete`: retry the DELETE (also after a restart) until it returns 200 or 404 |
+
+Treat **200 and 404 as success**, and retry a 503 with backoff. After a delete, `POST /v1/users` with that ID returns 409.
+
+**Reading responses.** Every 2xx response uses the same envelope: `request_id`, `user_id`, `server_time`, `api_version`, `model_ids`, `pipeline_version`, `data`, `warnings`. The Worker reads four fields:
+
+- `data`: the result;
+- `model_ids`: which `EVA-[n]` models produced it, empty for rule-based results and placeholders;
+- `server_time`: when it was computed;
+- `pipeline_version`: the preprocessing version, so results can be compared over time.
+
+Errors are `{"error": {"code", "message", "field"}}`.
+
+**Skip storing `source: mock`.** Until their weights are installed, the deep endpoints (`/v1/predict/ecg-deep`, `/sleep-deep`, `/seizure-deep`) answer with `data.source: "mock"` and `model_id: null`. Those outputs are placeholders, not predictions. Show them labelled as placeholders, or not at all, and don't store them as health results. Store a deep result only when `data.source` is `"model"`.
 
 ## Sizes and the seizure model
 
@@ -102,7 +151,7 @@ Requests are capped at 1 MB, which is about 30 s of 18-channel EEG at 250 Hz as 
 
 R2 has no tombstone guard. A raw-window upload already in flight when the DELETE lists `raw/<user_id>/` can land after the listing, so the API re-checks the tombstone after its uploads and deletes those keys. This is best effort: a crash between the upload and the re-check can still leave an orphan blob (only with `EVADE_STORE_RAW_WINDOWS=1`).
 
-`POST /v1/users` writes the user row before answering. If the row commits but the response is lost, the client's retry creates a second user, and the first row is an orphan whose ID nobody holds. It holds only the creation time and the coarse attributes given (cohort, age band, sex), no health data. This is accepted for the beta.
+`POST /v1/users` writes the user row before answering. Without `user_id`, if the row commits but the response is lost, the client's retry creates a second user, and the first row is an orphan whose ID nobody holds. It holds only the creation time and the coarse attributes given (cohort, age band, sex), no health data. This is accepted for the beta. With `user_id` the call is idempotent, so a retry returns the same user. A tombstoned ID gets 409 `user_deleted` (checked in memory, then in D1, and enforced again by the tombstone guard in the D1 insert), so registering can never bring a deleted user back.
 
 **Write rules.** State that later requests depend on is written to storage before the response, and a 503 there never leaves a change that a client retry would apply twice: users and device bindings are written first (a failed bind is rolled back in memory), unbind deletes the stored row before the in-memory one, and a baseline reset archives in D1 before memory. Overrides and the radiation state are idempotent on retry. Audit rows (readings and window metadata, flags, risk results) and the latest comparisons are best effort: a failed write returns 200 with the warning `stored in this service only: ...` instead of a 503. The latest comparisons and the locked EEG feature baseline are rewritten by the flush of the next request that does storage work, and so are changed baselines. A request's best-effort writes go to D1 as one batch. A stale baseline flush cannot bring back a reset baseline, because a reset archives the baseline IDs and archived IDs are never written back. A device's `last_seq` in D1 only moves forward.
 
