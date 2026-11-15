@@ -1,4 +1,4 @@
--- EVAde D1 schema, migration 1. Idempotent: safe to apply again.
+-- EVAde D1 schema, migrations 1 and 2. Idempotent: safe to apply again (re-apply after pulling a new migration).
 -- Apply with:  python -m evade.storage.migrate     (uses CF_ACCOUNT_ID, CF_API_TOKEN, CF_D1_DATABASE_ID)
 --        or:   npx wrangler d1 execute <database-name> --remote --file evade/storage/schema.sql
 -- Only pseudonymous user_ids (UUIDs). No names, emails or raw waveforms in any table.
@@ -103,3 +103,12 @@ CREATE TABLE IF NOT EXISTS tombstones (
 );
 
 INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CAST(strftime('%s', 'now') AS INTEGER));
+
+-- migration 2: a deletion whose row step committed but whose R2 step failed stays listed here until a retried
+-- DELETE finishes it (also after a restart). Cleared when every blob under the user's prefixes is gone.
+CREATE TABLE IF NOT EXISTS pending_deletions (
+  user_hash TEXT PRIMARY KEY,
+  started_at REAL NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, CAST(strftime('%s', 'now') AS INTEGER));

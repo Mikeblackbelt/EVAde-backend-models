@@ -19,9 +19,11 @@ class FakeD1:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         self.token, self.lock = token, threading.Lock()
-        self.fail_with: list = []          # queued failures: an int status code or an Exception instance
+        self.fail_with: list = []          # queued failures: a status code, (status, headers), or an Exception
         self.requests: list[dict] = []
         self.max_params_seen = 0
+        self.calls = 0                     # every HTTP call that reached the fake, failed or not
+        self.on_request = None             # optional hook(body: dict), run before a request is executed
 
     def _run(self, sql: str, params: list) -> list[dict]:
         assert sql.count("?") <= 100 and len(params) <= 100, "D1 allows at most 100 bound parameters"
@@ -32,14 +34,19 @@ class FakeD1:
 
     def handler(self, request):
         import httpx
+        self.calls += 1
         if self.fail_with:
             f = self.fail_with.pop(0)
             if isinstance(f, Exception):
                 raise f
-            return httpx.Response(f, json={"success": False, "errors": [{"code": f, "message": "injected"}]})
+            status, headers = f if isinstance(f, tuple) else (f, {})
+            return httpx.Response(status, headers=headers,
+                                  json={"success": False, "errors": [{"code": status, "message": "injected"}]})
         assert request.headers["authorization"] == f"Bearer {self.token}"
         assert request.url.path.endswith("/query")
         body = json.loads(request.content)
+        if self.on_request is not None:
+            self.on_request(body)
         self.requests.append(body)
         stmts = body["batch"] if "batch" in body else [body]
         out = []
@@ -75,6 +82,7 @@ class FakeS3:
 
     def __init__(self):
         self.objects: dict[tuple, bytes] = {}
+        self.fail_delete = False           # True: delete_objects raises, as during an R2 outage
 
     def put_object(self, Bucket, Key, Body, ContentType=None):
         self.objects[(Bucket, Key)] = bytes(Body)
@@ -94,6 +102,8 @@ class FakeS3:
                 **({"NextContinuationToken": str(start + self.PAGE)} if more else {})}
 
     def delete_objects(self, Bucket, Delete):
+        if self.fail_delete:
+            raise ConnectionError("injected R2 outage")
         for o in Delete["Objects"]:
             self.objects.pop((Bucket, o["Key"]), None)
         return {"Deleted": Delete["Objects"]}

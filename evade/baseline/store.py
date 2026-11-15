@@ -189,16 +189,25 @@ class BaselineStore:
             return n
 
     def reset(self, user_id: str, modality: str, phase: str = "demo") -> int:
+        """Archive in storage first (a failure leaves memory untouched, so a retry archives the same baselines), then
+        in memory. Storage archives the in-memory records' baseline_ids too, so a flush that took its snapshot before
+        the reset cannot write them back, even if they were never stored."""
         with self._lock:
-            keys = [k for k in self._b if k[0] == user_id and k[1] == modality]
-            for k in keys:
-                b = self._b.pop(k)
-                b.status = "archived"
-                self._archive.append(b)
-                self._dirty.discard(k)
+            snap = {k: b.baseline_id for k, b in self._b.items() if k[0] == user_id and k[1] == modality}
+            recs = [self._b[k].record() for k in snap]
         if self._storage is not None:
-            self._storage.archive_baselines(user_id, modality)
-        return len(keys)
+            self._storage.archive_baselines(user_id, modality, recs)
+        with self._lock:
+            n = 0
+            for k, bid in snap.items():
+                b = self._b.get(k)
+                if b is not None and b.baseline_id == bid:
+                    del self._b[k]
+                    b.status = "archived"
+                    self._archive.append(b)
+                    self._dirty.discard(k)
+                    n += 1
+            return n
 
     def for_user(self, user_id: str) -> list[dict]:
         with self._lock:

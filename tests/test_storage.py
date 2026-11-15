@@ -108,7 +108,8 @@ def test_d1_parameter_chunking():
 def test_d1_retries_then_succeeds():
     fake = FakeD1()
     slept = []
-    d1 = D1Client("acct", "db", TOKEN, transport=fake.transport(), sleep=slept.append, backoff_s=0.5)
+    # the default is 2 retries (test_review_fixes); 3 here so the whole backoff schedule is exercised
+    d1 = D1Client("acct", "db", TOKEN, transport=fake.transport(), sleep=slept.append, backoff_s=0.5, retries=3)
     fake.fail_with = [503, httpx.ConnectError("boom"), 429]
     assert d1.query("SELECT 1 AS x") == [{"x": 1}]
     assert slept == [0.5, 1.0, 2.0]

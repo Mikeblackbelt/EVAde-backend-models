@@ -1,4 +1,6 @@
-"""In-process backend (default, EVADE_STORAGE=memory): everything is lost on restart, as in the beta."""
+"""In-process backends. NullBackend is the default (EVADE_STORAGE=memory): the app's in-memory state is the only copy,
+as in the beta, so it keeps no second copy of readings, flags, risk results or blobs. MemoryBackend keeps everything
+(capped) and is the reference implementation the tests run against."""
 from __future__ import annotations
 
 import copy
@@ -70,10 +72,17 @@ class MemoryBackend(Storage):
         with self._lock:
             return [copy.deepcopy(r) for k, r in self.baselines.items() if k[0] == user_id]
 
-    def _archive_baselines(self, user_id, modality):
+    def _archive_baselines(self, user_id, modality, records):
         with self._lock:
+            now = time.time()
+            done = {b["baseline_id"] for b in self.archive}
+            mem = {r["baseline_id"]: r for r in records}
             for k in [k for k in self.baselines if k[0] == user_id and k[1] == modality]:
-                self.archive.append({**self.baselines.pop(k), "status": "archived", "archived_at": time.time()})
+                b = self.baselines.pop(k)
+                mem.setdefault(b["baseline_id"], b)
+            for bid, r in mem.items():
+                if bid not in done:
+                    self.archive.append({**copy.deepcopy(r), "status": "archived", "archived_at": now})
 
     def _put_state(self, user_id, key, value):
         with self._lock:
@@ -111,14 +120,22 @@ class MemoryBackend(Storage):
         with self._lock:
             self.devices[device_id] = copy.deepcopy(rec)
 
+    def _update_device(self, device_id, rec):
+        with self._lock:
+            cur = self.devices.get(device_id)
+            if cur is not None and cur["user_id"] == rec["user_id"] and                     (cur.get("last_seq") if cur.get("last_seq") is not None else -1) < rec.get("last_seq", -1):
+                self.devices[device_id] = copy.deepcopy(rec)
+
     def _get_device(self, device_id):
         with self._lock:
             d = self.devices.get(device_id)
             return copy.deepcopy(d) if d is not None else None
 
-    def _delete_device(self, device_id):
+    def _delete_device(self, device_id, user_id=None):
         with self._lock:
-            self.devices.pop(device_id, None)
+            cur = self.devices.get(device_id)
+            if cur is not None and (user_id is None or cur["user_id"] == user_id):
+                del self.devices[device_id]
 
     def _devices_for_user(self, user_id):
         with self._lock:
@@ -142,3 +159,29 @@ class MemoryBackend(Storage):
             for k in ks:
                 del self.blobs[k]
             return len(ks)
+
+
+class NullBackend(MemoryBackend):
+    """Default backend: users, baselines, state and devices as MemoryBackend (small, bounded by what the app holds);
+    input, flag and risk rows and blobs are dropped, because nothing reads them back without persistence."""
+
+    def has_blobs(self) -> bool:
+        return False
+
+    def _add_inputs(self, user_id, rows):
+        return None
+
+    def _add_flags(self, user_id, flags):
+        return None
+
+    def _add_risk(self, user_id, t, r_mdtr, band, summary):
+        return None
+
+    def _put_blob(self, key, data, content_type):
+        return None
+
+    def _get_blob(self, key):
+        return None
+
+    def _list_blobs(self, prefix):
+        return []

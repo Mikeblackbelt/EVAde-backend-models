@@ -10,19 +10,46 @@ What is stored (all keyed by the pseudonymous user_id; no names or emails ever r
                  only if EVADE_STORE_RAW_WINDOWS=1, as blobs under raw/<user_id>/
   flags, risk    non-green comparisons and risk results (R, band, overrides, MDTR summary)
   devices        Bluetooth device bindings (device_id -> user, kind, last seq)
-  blobs          raw windows, model artifacts (models/<task>/...), exports (exports/<user_id>/...)
+  blobs          raw windows, exports (exports/<user_id>/...); model artifacts live in their own bucket
+                 (evade/models/README.md)
 
-delete_user writes a tombstone first, so no later write can recreate the user's data, then removes every row and
-every blob under that user's prefixes. Writes for a tombstoned user are dropped silently.
+delete_user writes a tombstone and a pending-deletion marker first, then removes every row and every blob under the
+user's prefixes, and clears the marker last. The persistent backend enforces the tombstone inside every write
+statement, so a write already in flight when the DELETE commits cannot recreate rows; the in-process set below only
+saves a round trip.
+
+Time budget: storage_deadline() sets a per-request deadline (a context variable) that the D1 client honours, so one
+request cannot spend more than that on storage, however many calls it makes.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import threading
-from typing import Any
+import time
+from typing import Any, Iterator
 
 USER_BLOB_PREFIXES = ("raw/", "exports/")
 STATE_KEYS = ("radiation", "overrides", "latest", "eeg_baseline")
+WEEK_S = 7 * 86400
+
+_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("evade_storage_deadline", default=None)
+
+
+@contextlib.contextmanager
+def storage_deadline(seconds: float | None) -> Iterator[None]:
+    """Every storage call inside the block must finish within `seconds` (None: no deadline)."""
+    tok = _DEADLINE.set(None if seconds is None else time.monotonic() + max(0.0, float(seconds)))
+    try:
+        yield
+    finally:
+        _DEADLINE.reset(tok)
+
+
+def deadline_remaining() -> float | None:
+    d = _DEADLINE.get()
+    return None if d is None else d - time.monotonic()
 
 
 class StorageError(RuntimeError):
@@ -37,6 +64,18 @@ def user_hash(user_id: str) -> str:
     return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
 
 
+def trim_history(hist: list, keep: int = 100, now: float | None = None) -> list:
+    """The last `keep` (t, r) points plus the newest point at least 7 days old (the MDTR trend input)."""
+    if len(hist) <= keep:
+        return list(hist)
+    now = time.time() if now is None else now
+    out = list(hist[-keep:])
+    old = [x for x in hist[:-keep] if now - x[0] >= WEEK_S]
+    if old and not any(now - x[0] >= WEEK_S for x in out):
+        out.insert(0, old[-1])
+    return out
+
+
 class Storage:
     """Public API with tombstone gating; subclasses implement the _underscore methods."""
 
@@ -49,11 +88,32 @@ class Storage:
         self._tlock = threading.Lock()
 
     # ---- deletion ----
-    def is_deleted(self, user_id: str) -> bool:
+    def is_deleted(self, user_id: str, check_remote: bool = True) -> bool:
+        """In-process tombstone, else (persistent backends, check_remote) the stored one; positives are cached.
+        Never call with check_remote inside an application lock: it can be a network call."""
+        with self._tlock:
+            if user_id in self._tomb:
+                return True
+        if check_remote and self.persistent and self.is_tombstoned(user_id):
+            with self._tlock:
+                self._tomb.add(user_id)
+            return True
+        return False
+
+    def _gate(self, user_id: str) -> bool:
+        """Cheap pre-check for writes (in-process only); the backend's SQL guard is the authoritative check."""
         with self._tlock:
             return user_id in self._tomb
 
+    def is_tombstoned(self, user_id: str) -> bool:
+        return False
+
+    def deletion_incomplete(self, user_id: str) -> bool:
+        """True if a delete_user for this user started (tombstone written) but did not finish (blobs may remain)."""
+        return False
+
     def delete_user(self, user_id: str) -> dict:
+        """Idempotent: safe to run again after a failure part-way through."""
         with self._tlock:
             self._tomb.add(user_id)              # in-process gate first: concurrent writes are dropped from now on
         counts = self._delete_user(user_id)
@@ -61,34 +121,49 @@ class Storage:
         if self.has_blobs():
             for p in USER_BLOB_PREFIXES:
                 blobs += self._delete_prefix(f"{p}{user_id}/")
+        self._finish_delete(user_id)
         return {**counts, "blobs": blobs}
 
     # ---- users ----
     def put_user(self, user_id: str, attrs: dict) -> None:
-        if not self.is_deleted(user_id):
+        if not self._gate(user_id):
             self._put_user(user_id, attrs)
 
     def get_user(self, user_id: str) -> dict | None:
         return None if self.is_deleted(user_id) else self._get_user(user_id)
 
+    def load_user(self, user_id: str, risk_keep: int = 100) -> dict | None:
+        """Everything the API needs to hydrate one user, or None if unknown or tombstoned:
+        {"user", "baselines", "state", "devices", "risk"} with risk bounded by trim_history."""
+        if self.is_deleted(user_id):
+            return None
+        rec = self._get_user(user_id)
+        if rec is None:
+            return None
+        return {"user": rec, "baselines": self._get_baselines(user_id), "state": self._get_state(user_id),
+                "devices": self._devices_for_user(user_id),
+                "risk": trim_history(self._risk_history(user_id), risk_keep)}
+
     # ---- baselines ----
     def put_baselines(self, records: list[dict]) -> None:
-        recs = [r for r in records if not self.is_deleted(r["user_id"])]
+        recs = [r for r in records if not self._gate(r["user_id"])]
         if recs:
             self._put_baselines(recs)
 
     def get_baselines(self, user_id: str) -> list[dict]:
         return self._get_baselines(user_id)
 
-    def archive_baselines(self, user_id: str, modality: str) -> None:
-        if not self.is_deleted(user_id):
-            self._archive_baselines(user_id, modality)
+    def archive_baselines(self, user_id: str, modality: str, records: list[dict] = ()) -> None:
+        """Move the user's baselines for `modality` to the archive. `records` are the caller's in-memory copies
+        (possibly never stored yet); archiving their baseline_ids also blocks a stale flush from writing them back."""
+        if not self._gate(user_id):
+            self._archive_baselines(user_id, modality, list(records))
 
     # ---- per-user state documents ----
     def put_state(self, user_id: str, key: str, value: Any) -> None:
         if key not in STATE_KEYS:
             raise ValueError(f"unknown state key {key}")
-        if not self.is_deleted(user_id):
+        if not self._gate(user_id):
             self._put_state(user_id, key, value)
 
     def get_state(self, user_id: str) -> dict:
@@ -96,7 +171,7 @@ class Storage:
 
     # ---- readings / windows metadata ----
     def add_inputs(self, user_id: str, rows: list[dict]) -> None:
-        if rows and not self.is_deleted(user_id):
+        if rows and not self._gate(user_id):
             self._add_inputs(user_id, rows)
 
     def list_inputs(self, user_id: str) -> list[dict]:
@@ -104,7 +179,7 @@ class Storage:
 
     def put_raw_window(self, user_id: str, window_id: str, payload: bytes) -> str | None:
         """Store raw samples only when explicitly enabled; returns the blob key or None."""
-        if not (self.store_raw_windows and self.has_blobs()) or self.is_deleted(user_id):
+        if not (self.store_raw_windows and self.has_blobs()) or self._gate(user_id):
             return None
         key = f"raw/{user_id}/{window_id}.json"
         self._put_blob(key, payload, "application/json")
@@ -112,14 +187,14 @@ class Storage:
 
     # ---- flags and risk results ----
     def add_flags(self, user_id: str, flags: list[dict]) -> None:
-        if flags and not self.is_deleted(user_id):
+        if flags and not self._gate(user_id):
             self._add_flags(user_id, flags)
 
     def list_flags(self, user_id: str) -> list[dict]:
         return self._list_flags(user_id)
 
     def add_risk(self, user_id: str, t: float, r_mdtr: float, band: str, summary: dict) -> None:
-        if not self.is_deleted(user_id):
+        if not self._gate(user_id):
             self._add_risk(user_id, t, r_mdtr, band, summary)
 
     def risk_history(self, user_id: str) -> list[tuple[float, float]]:
@@ -127,20 +202,33 @@ class Storage:
 
     # ---- device bindings ----
     def put_device(self, device_id: str, rec: dict) -> None:
-        if not self.is_deleted(rec["user_id"]):
+        """Create or overwrite a binding (bind resets last_seq)."""
+        if not self._gate(rec["user_id"]):
             self._put_device(device_id, rec)
+
+    def update_device(self, device_id: str, rec: dict) -> None:
+        """Update an existing binding of the same user only if rec.last_seq is higher than the stored one;
+        never inserts (an unbound or deleted device stays gone)."""
+        if not self._gate(rec["user_id"]):
+            self._update_device(device_id, rec)
 
     def get_device(self, device_id: str) -> dict | None:
         rec = self._get_device(device_id)
         return None if rec is None or self.is_deleted(rec["user_id"]) else rec
 
-    def delete_device(self, device_id: str) -> None:
-        self._delete_device(device_id)
+    def delete_device(self, device_id: str, user_id: str | None = None) -> None:
+        self._delete_device(device_id, user_id)
 
     def devices_for_user(self, user_id: str) -> dict[str, dict]:
         return self._devices_for_user(user_id)
 
-    # ---- blobs (models, exports, raw windows) ----
+    # ---- batching ----
+    @contextlib.contextmanager
+    def buffered(self) -> Iterator[None]:
+        """Writes inside the block may be sent together when it exits (one request to the backend)."""
+        yield
+
+    # ---- blobs (exports, raw windows) ----
     def has_blobs(self) -> bool:
         return False
 
@@ -155,11 +243,12 @@ class Storage:
 
     # ---- to implement ----
     def _delete_user(self, user_id): raise NotImplementedError
+    def _finish_delete(self, user_id): return None
     def _put_user(self, user_id, attrs): raise NotImplementedError
     def _get_user(self, user_id): raise NotImplementedError
     def _put_baselines(self, records): raise NotImplementedError
     def _get_baselines(self, user_id): raise NotImplementedError
-    def _archive_baselines(self, user_id, modality): raise NotImplementedError
+    def _archive_baselines(self, user_id, modality, records): raise NotImplementedError
     def _put_state(self, user_id, key, value): raise NotImplementedError
     def _get_state(self, user_id): raise NotImplementedError
     def _add_inputs(self, user_id, rows): raise NotImplementedError
@@ -169,8 +258,9 @@ class Storage:
     def _add_risk(self, user_id, t, r_mdtr, band, summary): raise NotImplementedError
     def _risk_history(self, user_id): raise NotImplementedError
     def _put_device(self, device_id, rec): raise NotImplementedError
+    def _update_device(self, device_id, rec): raise NotImplementedError
     def _get_device(self, device_id): raise NotImplementedError
-    def _delete_device(self, device_id): raise NotImplementedError
+    def _delete_device(self, device_id, user_id): raise NotImplementedError
     def _devices_for_user(self, user_id): raise NotImplementedError
     def _put_blob(self, key, data, content_type): raise StorageConfigError("no blob store configured")
     def _get_blob(self, key): raise StorageConfigError("no blob store configured")

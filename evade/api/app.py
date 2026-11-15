@@ -7,6 +7,7 @@ Env:
   EVADE_MODEL_DIR      folder of model folders <task>/manifest.json (evade/models/README.md); optional
   EVADE_ALLOW_DRAFT    "1" to serve draft (beta) models; they are labelled draft in every response
   EVADE_STORAGE        memory (default, state lost on restart) or cloudflare (D1 + R2; see evade/storage)
+  EVADE_STORAGE_DEADLINE_S  per-request time budget for storage calls (default 8); /v1/health never touches storage
 Outputs are flags for human review, never diagnoses.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ import secrets
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -31,7 +33,8 @@ from .. import storage as storage_mod
 from ..baseline.store import BaselineStore, domain_scores
 from ..models.export import headline_from_metrics
 from ..models.registry import ModelRegistry
-from ..storage import StorageError
+from ..storage import StorageError, deadline_s, storage_deadline
+from ..storage.base import trim_history
 from ..preprocessing import PIPELINE_VERSION, config
 from ..preprocessing.ecg import detect_qrs, hrv_features, preprocess_ecg
 from ..preprocessing.eeg import bipolar_from_monopolar, preprocess_eeg, select_bipolar
@@ -43,6 +46,9 @@ from . import schemas as S
 API_VERSION = "0.1.0-beta"
 MAX_BODY = 1_000_000
 MAX_SEQ_JUMP = 100_000
+RISK_KEEP = 100            # risk points kept per user (plus the newest one at least 7 days old, for the MDTR trend)
+MISS_TTL_S, MISS_MAX = 60.0, 10_000
+SOFT_WARNING = "stored in this service only: the storage write failed (it is not retried for this request)"
 ACTIONS = {
     ("cardiac", "yellow"): ("Heart metrics above your baseline", ["Pause strenuous work if safe", "Re-check in 10 minutes at rest"]),
     ("cardiac", "red"): ("Heart metrics well above your baseline", ["Stop strenuous work", "Re-measure at rest", "Contact the flight surgeon if it persists"]),
@@ -58,14 +64,52 @@ ACTIONS = {
 log = logging.getLogger("evade.api")
 
 
+class MissCache:
+    """user_ids recently not found in storage (bounded LRU with a TTL), so unknown IDs do not hit D1 every time."""
+
+    def __init__(self, ttl_s: float = MISS_TTL_S, max_n: int = MISS_MAX):
+        self.ttl_s, self.max_n = ttl_s, max_n
+        self._d: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> bool:
+        with self._lock:
+            t = self._d.get(key)
+            if t is None:
+                return False
+            if time.monotonic() - t > self.ttl_s:
+                del self._d[key]
+                return False
+            return True
+
+    def add(self, key: str) -> None:
+        with self._lock:
+            self._d[key] = time.monotonic()
+            self._d.move_to_end(key)
+            while len(self._d) > self.max_n:
+                self._d.popitem(last=False)
+
+    def discard(self, key: str) -> None:
+        with self._lock:
+            self._d.pop(key, None)
+
+
 class State:
-    """In-memory working state. Every change is also written to self.storage (a no-op cost with the memory
-    backend); with a persistent backend, a user unknown to this process is loaded from storage on first use."""
+    """In-memory working state. Changes are also written to self.storage (nothing is kept twice with the default
+    memory backend); with a persistent backend, a user unknown to this process is loaded from storage on first use.
+
+    Write rules: state that later requests depend on (users, device bindings, overrides, radiation, baseline
+    archives) is written to storage before the response, and either storage goes first or the change is idempotent,
+    so a 503 and a client retry never apply it twice. Audit rows (inputs, flags, risk results) and the latest
+    comparisons are best effort: a failure gives a warning, not a 503; latest and the EEG baseline are retried by the
+    next request's flush."""
 
     def __init__(self):
         self.storage = storage_mod.from_env()
         self.users: dict[str, dict] = {}
         self.pending_deletes: set[str] = set()   # storage deletion failed; DELETE may be retried
+        self.missing = MissCache()                # recently unknown user_ids
+        self.state_dirty: set[tuple] = set()      # (user_id, state key) whose storage write failed; flushed later
         self.baselines = BaselineStore(self.storage)
         self.latest: dict[str, dict] = {}        # user_id -> {modality: [comparisons]}
         self.radiation: dict[str, dict] = {}
@@ -126,13 +170,83 @@ async def _mw(request: Request, call_next):
             return JSONResponse({"error": {"code": "length_required", "message": "Content-Length header required"}}, status_code=411)
         if int(cl) > MAX_BODY:
             return JSONResponse({"error": {"code": "payload_too_large", "message": "body over 1 MB"}}, status_code=413)
-    resp = await call_next(request)
-    if STATE.baselines.dirty:                      # one batched baseline write per request, outside every lock
+    if request.url.path == "/v1/health":           # never waits on storage
+        return await call_next(request)
+    with storage_deadline(deadline_s()):           # one time budget for every storage call of this request
+        resp = await call_next(request)
+    if STATE.baselines.dirty or STATE.state_dirty:   # batched writes after the endpoint, outside every lock
         try:
-            await run_in_threadpool(STATE.baselines.flush)
+            await run_in_threadpool(flush_all)
         except StorageError as e:                  # kept in memory and marked dirty; the next request retries
-            log.warning("baseline flush failed: %s", e)
+            log.warning("flush failed: %s", e)
     return resp
+
+
+_SKIP = object()
+
+
+def state_value(user_id: str, key: str):
+    """The current in-memory value of a best-effort state document, or _SKIP if the user is gone."""
+    with STATE.lock:
+        if user_id not in STATE.users:
+            return _SKIP
+        if key == "latest":
+            return list(STATE.latest.get(user_id, {}).values())
+        if key == "eeg_baseline":
+            e = STATE.eeg_feats.get(user_id) or {}
+            return {"med": e["med"].tolist(), "mad": e["mad"].tolist()} if e.get("med") is not None else None
+    raise ValueError(key)
+
+
+def _write_states(keys) -> None:
+    for uid, key in keys:
+        v = state_value(uid, key)
+        if v is not _SKIP:
+            STATE.storage.put_state(uid, key, v)
+
+
+def flush_all() -> None:
+    """Rewrite failed best-effort state documents (current values), then the changed baselines."""
+    with storage_deadline(deadline_s()):
+        with STATE.lock:
+            pending, STATE.state_dirty = STATE.state_dirty, set()
+        if pending:
+            try:
+                with STATE.storage.buffered():
+                    _write_states(sorted(pending))
+            except StorageError:
+                with STATE.lock:
+                    STATE.state_dirty |= pending
+                raise
+        STATE.baselines.flush()
+
+
+def persist_soft(user_id: str, warn: list, *, state_keys=(), flags=(), windows=(), readings=(), endpoint: str = "",
+                 inputs=(), risk=None, device=None) -> None:
+    """Best-effort writes for one request, sent as one batch. A failure logs, adds a warning and marks the state
+    keys for the next flush; it never fails the request, so a client retry cannot apply the change twice."""
+    keys = {(user_id, k) for k in state_keys}
+    with STATE.lock:
+        STATE.state_dirty -= keys                  # the write below carries the current value
+    st = STATE.storage
+    try:
+        with st.buffered():
+            if device is not None:
+                st.update_device(*device)          # monotonic last_seq; never re-inserts an unbound device
+            _write_states(sorted(keys))
+            if flags:
+                st.add_flags(user_id, flags)
+            rows = input_rows(user_id, windows, endpoint, readings) + list(inputs)
+            if rows:
+                st.add_inputs(user_id, rows)
+            if risk is not None:
+                st.add_risk(user_id, *risk)
+    except StorageError as e:
+        with STATE.lock:
+            STATE.state_dirty |= keys
+        log.warning("best-effort storage write failed (%s): %s", endpoint or "request", e)
+        if SOFT_WARNING not in warn:
+            warn.append(SOFT_WARNING)
 
 
 def auth(authorization: str | None = Header(None)) -> None:
@@ -153,16 +267,20 @@ def user(user_id: str) -> dict:
 
 
 def hydrate(user_id: str) -> dict | None:
-    """Load a user this process has not seen from persistent storage (remote calls happen outside the lock)."""
-    st = STATE.storage
-    rec = st.get_user(user_id)
-    if rec is None:
+    """Load a user this process has not seen from persistent storage in one request (outside the lock).
+    Tombstoned users are refused; misses are cached for MISS_TTL_S."""
+    if STATE.missing.hit(user_id):
         return None
-    bl, doc, devs, hist = st.get_baselines(user_id), st.get_state(user_id), st.devices_for_user(user_id), st.risk_history(user_id)
+    st = STATE.storage
+    data = st.load_user(user_id, RISK_KEEP)
+    if data is None:
+        STATE.missing.add(user_id)
+        return None
+    rec, doc, devs = data["user"], data["state"], data["devices"]
     with STATE.lock:
         if user_id in STATE.users:
             return STATE.users[user_id]
-        if st.is_deleted(user_id):
+        if st.is_deleted(user_id, check_remote=False) or user_id in STATE.pending_deletes:
             return None
         STATE.users[user_id] = rec
         if doc.get("latest"):
@@ -177,8 +295,8 @@ def hydrate(user_id: str) -> dict | None:
             STATE.eeg_feats[user_id] = {"rows": [], "med": np.asarray(e["med"], float), "mad": np.asarray(e["mad"], float)}
         for k, v in devs.items():
             STATE.devices.setdefault(k, v)
-        STATE.risk_history[user_id] = [tuple(x) for x in hist]
-    STATE.baselines.load(bl)
+        STATE.risk_history[user_id] = [tuple(x) for x in data["risk"]]
+    STATE.baselines.load(data["baselines"])
     return rec
 
 
@@ -188,23 +306,21 @@ def envelope(user_id: str | None, data: dict, model_ids: list[str] | None = None
             "data": data, "warnings": warnings or []}
 
 
-def remember(user_id: str, comps: list[dict]) -> None:
+def remember(user_id: str, comps: list[dict]) -> list[dict]:
+    """Update the latest comparisons in memory; returns the flag rows for persist_soft."""
     with STATE.lock:
         if user_id not in STATE.users:          # deleted while this request was running
-            return
+            return []
         cur = STATE.latest.setdefault(user_id, {})
         for c in comps:
             cur[(c["modality"], c["metric"])] = c
-        latest = list(cur.values())
     now = time.time()
-    STATE.storage.put_state(user_id, "latest", latest)
-    STATE.storage.add_flags(user_id, [{"t": now, **{k: c.get(k) for k in ("domain", "metric", "modality", "level", "z",
-                                                                             "component_score", "confidence")}}
-                                      for c in comps if c.get("level") != "green"])
+    return [{"t": now, **{k: c.get(k) for k in ("domain", "metric", "modality", "level", "z", "component_score",
+                                               "confidence")}} for c in comps if c.get("level") != "green"]
 
 
-def log_inputs(user_id: str, windows: list, endpoint: str, readings: list = ()) -> None:
-    """Store reading values and window metadata (never the samples, unless EVADE_STORE_RAW_WINDOWS=1 puts them in R2)."""
+def input_rows(user_id: str, windows: list, endpoint: str, readings: list = ()) -> list[dict]:
+    """Reading values and window metadata (never the samples, unless EVADE_STORE_RAW_WINDOWS=1 puts them in R2)."""
     rows = [{"kind": f"reading:{r.modality}", "t_utc": r.t_utc.isoformat(),
              "meta": {"endpoint": endpoint, "metric": r.metric, "value": r.value, "unit": r.unit, "quality": r.quality}}
             for r in readings]
@@ -214,7 +330,7 @@ def log_inputs(user_id: str, windows: list, endpoint: str, readings: list = ()) 
         rows.append({"kind": f"window:{w.modality}", "t_utc": w.t0_utc.isoformat(), "blob_key": key,
                      "meta": {"endpoint": endpoint, "fs_hz": w.fs_hz, "channels": len(w.channels),
                               "n_samples": len(w.samples[0]) if w.samples else 0, "source": w.source}})
-    STATE.storage.add_inputs(user_id, rows)
+    return rows
 
 
 def alerts_for(comps: list[dict]) -> list[dict]:
@@ -300,27 +416,26 @@ def window_comparisons(user_id: str, w: S.Window) -> list[dict]:
 EEG_FEAT_MIN = 30     # 4 s windows (about 1 minute of EEG) before the seizure model can run for a user
 
 
-def add_eeg_feature_baseline(user_id: str, feats: np.ndarray) -> None:
-    locked = None
+def add_eeg_feature_baseline(user_id: str, feats: np.ndarray) -> bool:
+    """Returns True when this call locked the baseline (the caller stores the median and MAD, never the rows)."""
     with STATE.lock:
         if user_id not in STATE.users:
-            return
+            return False
         st = STATE.eeg_feats.setdefault(user_id, {"rows": [], "med": None, "mad": None})
         if st["med"] is not None:
-            return                              # locked; reset by /v1/baseline/eeg/reset
+            return False                        # locked; reset by /v1/baseline/eeg/reset
         st["rows"].extend(np.asarray(feats, np.float64).tolist())
         if len(st["rows"]) >= EEG_FEAT_MIN:
             X = np.asarray(st["rows"])
             med = np.median(X, axis=0)
             st["med"], st["mad"] = med, np.maximum(1.4826 * np.median(np.abs(X - med), axis=0), 1e-6)
-            locked = {"med": st["med"].tolist(), "mad": st["mad"].tolist()}
-    if locked:                                  # only the locked median and MAD are stored, not the rows
-        STATE.storage.put_state(user_id, "eeg_baseline", locked)
+            return True
+    return False
 
 
 # ---------------- endpoints ----------------
 @app.get("/v1/health")
-def health():
+async def health():                              # async: never queued behind a threadpool busy with storage calls
     return {"status": "ok", "api_version": API_VERSION, "models_loaded": sorted(STATE.models),
             "server_time": datetime.now(timezone.utc).isoformat()}
 
@@ -330,7 +445,10 @@ def models():
     rows = []
     for task, m in STATE.models.items():
         man = m.get("manifest") or {}
+        verified = bool(m.get("sha256_verified"))
         rows.append({"task": task, "model_id": m["model_id"], "status": m["status"], "available": True,
+                     "legacy": bool(m.get("legacy")), "sha256_verified": verified,
+                     "integrity": "sha256_verified" if verified else "unverified",
                      "headline": headline(task, m), "format": man.get("format"), "input": man.get("input"),
                      "output": man.get("output"), "code_commit": man.get("code_commit"),
                      "trained_at": man.get("trained_at"), "data": man.get("data")})
@@ -356,17 +474,22 @@ def create_user(body: S.UserCreate):
 
 @app.delete("/v1/users/{user_id}", dependencies=[Depends(auth)])
 def delete_user(user_id: str):
-    if user_id not in STATE.pending_deletes:     # a retried delete skips the lookup
-        user(user_id)                            # 404 unless known here or in storage
+    st = STATE.storage
+    if user_id not in STATE.pending_deletes and user_id not in STATE.users:
+        # a deletion whose rows were removed but whose blobs were not (R2 failed, then maybe a restart) is finished
+        # by rerunning the idempotent storage delete; a completed deletion gives 404 like any unknown user
+        if not (st.persistent and st.deletion_incomplete(user_id)):
+            user(user_id)                        # 404 unless known here or in storage
     with STATE.lock:
         STATE.baselines.delete_user(user_id)     # tombstone first, so concurrent requests cannot recreate data
         for d in (STATE.users, STATE.latest, STATE.radiation, STATE.overrides, STATE.risk_history, STATE.inputs, STATE.eeg_feats):
             d.pop(user_id, None)
         for dev in [k for k, v in STATE.devices.items() if v["user_id"] == user_id]:
             del STATE.devices[dev]
+        STATE.state_dirty = {k for k in STATE.state_dirty if k[0] != user_id}
         STATE.pending_deletes.add(user_id)
     try:
-        removed = STATE.storage.delete_user(user_id)   # storage tombstone, every row, every blob under the user's prefixes
+        removed = st.delete_user(user_id)   # storage tombstone, every row, every blob under the user's prefixes
     except StorageError as e:
         log.error("delete_user storage step failed: %s", e)
         raise err(503, "deletion_incomplete", "user data removed from this service but not yet from storage; "
@@ -380,6 +503,7 @@ def delete_user(user_id: str):
 def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
     user(body.user_id)
     excluded = {"low_quality": 0, "wrong_modality": 0}
+    eeg_locked = False
     for w in body.windows:
         if w.modality != modality:
             excluded["wrong_modality"] += 1
@@ -394,7 +518,7 @@ def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
             excluded["low_quality"] += 1
             continue
         if w.modality == "eeg":
-            add_eeg_feature_baseline(body.user_id, feats)
+            eeg_locked |= add_eeg_feature_baseline(body.user_id, feats)
             for row in eeg_rows_metrics(feats):          # one observation per 4 s sub-window
                 for k, v in row.items():
                     STATE.baselines.add(body.user_id, "eeg", k, float(v), quality=q, mode=body.mode, phase=body.phase)
@@ -404,10 +528,11 @@ def baseline_submit(modality: S.Modality, body: S.BaselineSubmit):
                 STATE.baselines.add(body.user_id, modality, k, float(v), quality=q, mode=body.mode, phase=body.phase)
     for r in body.readings:
         STATE.baselines.add(body.user_id, modality, r.metric, r.value, quality=r.quality, mode=body.mode, phase=body.phase)
-    log_inputs(body.user_id, body.windows, f"baseline/{modality}", body.readings)
+    warn = ["demo baseline: short windows, label every result as demo"] if body.mode == "demo" else []
+    persist_soft(body.user_id, warn, state_keys=("eeg_baseline",) if eeg_locked else (), windows=body.windows,
+                 readings=body.readings, endpoint=f"baseline/{modality}")
     rows = [b for b in STATE.baselines.for_user(body.user_id) if b["modality"] == modality]
-    return envelope(body.user_id, {"modality": modality, "baselines": rows, "excluded": excluded},
-                    warnings=["demo baseline: short windows, label every result as demo"] if body.mode == "demo" else [])
+    return envelope(body.user_id, {"modality": modality, "baselines": rows, "excluded": excluded}, warnings=warn)
 
 
 @app.post("/v1/baseline/{modality}/confirm", dependencies=[Depends(auth)])
@@ -421,9 +546,12 @@ def baseline_reset(modality: S.Modality, body: S.BaselineReset):
     user(body.user_id)
     if modality == "eeg":
         with STATE.lock:
+            STATE.state_dirty.discard((body.user_id, "eeg_baseline"))
+        STATE.storage.put_state(body.user_id, "eeg_baseline", None)     # storage first; idempotent
+        with STATE.lock:
             STATE.eeg_feats.pop(body.user_id, None)
-        STATE.storage.put_state(body.user_id, "eeg_baseline", None)
-    return envelope(body.user_id, {"archived": STATE.baselines.reset(body.user_id, modality, body.phase), "reason": body.reason})
+    archived = STATE.baselines.reset(body.user_id, modality, body.phase)   # archives in storage, then in memory
+    return envelope(body.user_id, {"archived": archived, "reason": body.reason})
 
 
 @app.get("/v1/users/{user_id}/baseline", dependencies=[Depends(auth)])
@@ -441,12 +569,13 @@ def compare(body: S.CompareRequest):
     for r in body.readings:
         c = STATE.baselines.compare(body.user_id, r.modality, r.metric, r.value, quality=r.quality, unit=r.unit)
         comps.append(c)
-    remember(body.user_id, comps)
-    log_inputs(body.user_id, body.windows, "compare", body.readings)
+    warn: list[str] = []
+    persist_soft(body.user_id, warn, state_keys=("latest",), flags=remember(body.user_id, comps), windows=body.windows,
+                 readings=body.readings, endpoint="compare")
     return envelope(body.user_id, {"comparisons": comps, "domain_scores": domain_scores(comps),
                                    "flags": [{"domain": c["domain"], "metric": c["metric"], "level": c["level"]}
                                              for c in comps if c["level"] != "green"],
-                                   "alerts": alerts_for(comps)})
+                                   "alerts": alerts_for(comps)}, warnings=warn)
 
 
 @app.post("/v1/predict/ecg", dependencies=[Depends(auth)])
@@ -457,8 +586,9 @@ def predict_ecg(body: S.EcgRequest):
         raise err(422, "validation_error", "window.modality must be ecg", "window.modality")
     m, q = ecg_window_metrics(w)
     comps = window_comparisons(body.user_id, w)
-    remember(body.user_id, comps)
-    log_inputs(body.user_id, [w], "predict/ecg")
+    warn: list[str] = []
+    persist_soft(body.user_id, warn, state_keys=("latest",), flags=remember(body.user_id, comps), windows=[w],
+                 endpoint="predict/ecg")
     hr, irr = m["hr_bpm"], m["rr_irregularity"]
     if q < 0.5 or not np.isfinite(hr):
         rhythm = {"flag": None, "low_quality": True}
@@ -477,7 +607,7 @@ def predict_ecg(body: S.EcgRequest):
         data["superclass_probability"] = {k: round(float(c.predict_proba(f)[0, 1]), 3) for k, c in mdl["model"].items()}
         data["superclass_note"] = "beta draft model (PTB-XL, 12-lead hospital ECG); a probability for review, not a diagnosis"
         ids.append(mdl["model_id"])
-    return envelope(body.user_id, data, ids, ["draft model output"] if ids else [])
+    return envelope(body.user_id, data, ids, (["draft model output"] if ids else []) + warn)
 
 
 @app.post("/v1/predict/eeg", dependencies=[Depends(auth)])
@@ -490,8 +620,7 @@ def predict_eeg(body: S.EegRequest):
         raise err(422, "bad_shape", "EEG window must be at least 4 s", "window.samples")
     feats, names, m, q, n_present = eeg_window_metrics(w)
     comps = window_comparisons(body.user_id, w)
-    remember(body.user_id, comps)
-    log_inputs(body.user_id, [w], "predict/eeg")
+    flags = remember(body.user_id, comps)
     data = {"quality_index": round(q, 3), "channels_mapped": n_present,
             "features": {k: round(v, 4) for k, v in m.items()}, "comparison": comps}
     ids, warn = [], []
@@ -515,7 +644,7 @@ def predict_eeg(body: S.EegRequest):
                            "note": "beta draft model; never raises override O4 on its own, a human reviews"}
         # feed the neuro domain as a shadow input: it raises R but cannot trip the flag or T_extreme alone
         sc = {"red": 0.70, "yellow": 0.40, "green": 0.0}[lvl]
-        remember(body.user_id, [{"metric": "seizure_probability", "modality": "eeg", "domain": "neuro", "value": round(pmax, 3),
+        flags += remember(body.user_id, [{"metric": "seizure_probability", "modality": "eeg", "domain": "neuro", "value": round(pmax, 3),
                                  "level": lvl, "component_score": sc, "shadow": True, "confidence": "demo",
                                  "unit": "probability", "quality_index": round(q, 3)}])
         ids.append(mdl["model_id"]); warn.append("draft model output")
@@ -524,6 +653,7 @@ def predict_eeg(body: S.EegRequest):
                            "note": f"submit at least {EEG_FEAT_MIN} 4 s windows of EEG to /v1/baseline/eeg first"}
     elif mdl:
         data["seizure"] = {"flag": None, "low_quality": True}
+    persist_soft(body.user_id, warn, state_keys=("latest",), flags=flags, windows=[w], endpoint="predict/eeg")
     return envelope(body.user_id, data, ids, warn)
 
 
@@ -568,7 +698,7 @@ def predict_risk(body: S.RiskRequest):
     overrides = sorted(set(body.overrides) | STATE.overrides.get(body.user_id, set()))
     r = risk(doms, overrides)
     rad = STATE.radiation.get(body.user_id, {})
-    hist = STATE.risk_history.setdefault(body.user_id, [])
+    hist = list(STATE.risk_history.get(body.user_id, []))
     r7 = body.r_7d_ago
     if r7 is None:
         old = [x for x in hist if time.time() - x[0] >= 7 * 86400]
@@ -578,15 +708,20 @@ def predict_risk(body: S.RiskRequest):
              dose_rate_msv_day=body.dose_rate_msv_day if body.dose_rate_msv_day is not None else rad.get("rate"),
              bone_loss_pct=body.bone_loss_pct, bone_slope_pct_day=body.bone_slope_pct_day)
     now = time.time()
-    hist.append((now, r.r_mdtr))
-    STATE.storage.add_risk(body.user_id, now, r.r_mdtr, r.band,
-                           {"r_agg": r.r_agg, "r_disp": r.r_disp, "flag": r.flag, "flag_domains": r.flag_domains,
-                            "override_ids": r.override_ids, "provisional": bool(warn), "mdtr": m})
+    provisional = bool(warn)
+    with STATE.lock:
+        if body.user_id in STATE.users:
+            STATE.risk_history[body.user_id] = trim_history(STATE.risk_history.get(body.user_id, []) + [(now, r.r_mdtr)],
+                                                            RISK_KEEP, now)
+    persist_soft(body.user_id, warn, endpoint="predict/risk",
+                 risk=(now, r.r_mdtr, r.band, {"r_agg": r.r_agg, "r_disp": r.r_disp, "flag": r.flag,
+                                               "flag_domains": r.flag_domains, "override_ids": r.override_ids,
+                                               "provisional": provisional, "mdtr": m}))
     acts =[{"action_id": f"{d}_{'red' if r.domains[d]['s'] >= 0.6 else 'yellow'}"} for d in r.flag_domains
             if (d, "red" if r.domains[d]["s"] >= 0.6 else "yellow") in ACTIONS]
     return envelope(body.user_id, {
         "risk": {"r_agg": round(r.r_agg, 3), "r_disp": round(r.r_disp, 3), "band": r.band, "flag": r.flag,
-                 "flag_domains": r.flag_domains, "override_ids": r.override_ids, "provisional": bool(warn), "interval": None},
+                 "flag_domains": r.flag_domains, "override_ids": r.override_ids, "provisional": provisional, "interval": None},
         "domains": r.domains, "mdtr": m, "actions": [a["action_id"] for a in acts],
         "note": "decision support for human review; overrides escalate to a clinician and take no action"}, warnings=warn)
 
@@ -599,12 +734,14 @@ def self_report(body: S.SelfReport):
         v = float(getattr(body, k))
         comps.append(STATE.baselines.compare(body.user_id, "behavioral", k, v, unit="1-5"))
         STATE.baselines.add(body.user_id, "behavioral", k, v)
-    remember(body.user_id, comps)
+    flags = remember(body.user_id, comps)
     with STATE.lock:
         STATE.inputs.setdefault(body.user_id, []).append({"type": "self_report", "t": body.t_utc.isoformat()})
-    STATE.storage.add_inputs(body.user_id, [{"kind": "self_report", "t_utc": body.t_utc.isoformat(),
-                                             "meta": {k: getattr(body, k) for k in ("sleep_quality", "stress", "fatigue", "mood")}}])
-    return envelope(body.user_id, {"record_id": uuid.uuid4().hex[:12], "comparison": comps})
+    warn: list[str] = []
+    persist_soft(body.user_id, warn, state_keys=("latest",), flags=flags, endpoint="input/self-report",
+                 inputs=[{"kind": "self_report", "t_utc": body.t_utc.isoformat(),
+                          "meta": {k: getattr(body, k) for k in ("sleep_quality", "stress", "fatigue", "mood")}}])
+    return envelope(body.user_id, {"record_id": uuid.uuid4().hex[:12], "comparison": comps}, warnings=warn)
 
 
 @app.post("/v1/input/instrument", dependencies=[Depends(auth)])
@@ -637,26 +774,42 @@ def bind_device(body: S.DeviceBind):
     # a binding stored for a user this process has not loaded still counts (deleting a user deletes its bindings)
     stored = STATE.storage.get_device(body.device_id) if STATE.storage.persistent else None
     with STATE.lock:
-        cur = STATE.devices.get(body.device_id) or stored
+        prev = STATE.devices.get(body.device_id)
+        cur = prev or stored
         if cur and cur["user_id"] != body.user_id and (cur["user_id"] in STATE.users or cur is stored):
             raise err(409, "device_already_bound", "device is bound to another user; unbind it first", "device_id")
         rec = STATE.devices[body.device_id] = {"user_id": body.user_id, "kind": body.kind, "vendor": body.vendor,
                                                "model": body.model, "firmware": body.firmware, "last_seq": -1,
                                                "last_seen": None, "battery_pct": None, "gaps": 0}
-        rec = dict(rec)
-    STATE.storage.put_device(body.device_id, rec)
+        snapshot = dict(rec)
+    try:
+        STATE.storage.put_device(body.device_id, snapshot)
+    except StorageError:                         # roll back, so the 503 leaves the service as it was
+        with STATE.lock:
+            if STATE.devices.get(body.device_id) is rec:
+                if prev is None:
+                    del STATE.devices[body.device_id]
+                else:
+                    STATE.devices[body.device_id] = prev
+        raise
     return envelope(body.user_id, {"device_id": body.device_id, "bound": True})
 
 
 @app.delete("/v1/devices/{device_id}", dependencies=[Depends(auth)])
 def unbind_device(device_id: str, user_id: str):
     user(user_id)
+    st = STATE.storage
     with STATE.lock:
         cur = STATE.devices.get(device_id)
-        if not cur or cur["user_id"] != user_id:
-            raise err(404, "device_not_found", "no such device for this user", "device_id")
-        del STATE.devices[device_id]
-    STATE.storage.delete_device(device_id)
+    if cur is None and st.persistent:
+        cur = st.get_device(device_id)           # stored binding this process does not hold
+    if not cur or cur["user_id"] != user_id:
+        raise err(404, "device_not_found", "no such device for this user", "device_id")
+    st.delete_device(device_id, user_id)         # storage first: a 503 leaves the binding in place for the retry
+    with STATE.lock:
+        c = STATE.devices.get(device_id)
+        if c is not None and c["user_id"] == user_id:
+            del STATE.devices[device_id]
     return envelope(user_id, {"device_id": device_id, "bound": False})
 
 
@@ -701,14 +854,9 @@ def ingest_batch(body: S.IngestBatch):
         dev_rec = dict(dev)
     # the seq is committed: a storage failure from here on must not fail the request, or the device's retry
     # would be counted as a duplicate and the batch lost; the in-memory state is already updated
-    warn = []
-    for step in (lambda: STATE.storage.put_device(body.device_id, dev_rec), lambda: remember(body.user_id, comps),
-                 lambda: log_inputs(body.user_id, body.windows, "ingest/batch", body.readings)):
-        try:
-            step()
-        except StorageError as e:
-            log.warning("ingest storage write failed after seq commit: %s", e)
-            warn = ["accepted; the storage write failed and this batch is kept in this service only"]
+    warn: list[str] = []
+    persist_soft(body.user_id, warn, state_keys=("latest",), flags=remember(body.user_id, comps), windows=body.windows,
+                 readings=body.readings, endpoint="ingest/batch", device=(body.device_id, dev_rec))
     flagged = [c for c in comps if c["level"] != "green"]
     return envelope(body.user_id, {"accepted": len(body.windows) + len(body.readings), "duplicates": 0,
                                    "gap_before": max(gap, 0), "next_seq_expected": body.seq + 1,

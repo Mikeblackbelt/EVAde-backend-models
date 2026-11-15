@@ -5,31 +5,40 @@ D1:  POST https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database
      100 bound parameters per statement (D1 limit), so multi-row inserts are chunked.
 R2:  https://{account_id}.r2.cloudflarestorage.com with boto3 (optional dependency; only needed for blobs).
 
-Retries: transport errors, 429 and 5xx, with exponential backoff; a 200 body with success=false is an error.
+Retries: transport errors, 429 and 5xx, at most 2 retries with exponential backoff or Retry-After; timeouts connect
+3 s, read 5 s; a circuit breaker fails fast for 30 s after 5 consecutive failed attempts; the per-request deadline
+(evade.storage.base.storage_deadline) caps the total. A 200 body with success=false is an error.
+Tombstones: every write to a user table is an INSERT ... SELECT ... WHERE NOT EXISTS (tombstone), or an UPDATE/DELETE
+of rows that a deletion already removed, so a write in flight when a DELETE commits cannot recreate data.
 Credentials are held in memory only and never logged, put in exception messages, or shown in repr().
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
 import numbers
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
-from .base import Storage, StorageConfigError, StorageError, user_hash
+from .base import WEEK_S, Storage, StorageConfigError, StorageError, deadline_remaining, trim_history, user_hash
 
 log = logging.getLogger("evade.storage")
 D1_URL = "https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{db}/query"
 MAX_PARAMS = 100
+STMTS_PER_CALL = 20
 USER_TABLES = ("users", "baselines", "baseline_archive", "user_state", "inputs", "flags", "risk_results", "devices")
+NOT_TOMB = "NOT EXISTS (SELECT 1 FROM tombstones WHERE user_hash = ?)"
 
 
 def _val(v: Any) -> str | None:
     """D1 REST params are documented as strings: send scalars as text (column affinity turns numeric text back into
-    REAL/INTEGER on insert and compares it as a number) and keep NULL as null."""
+    REAL/INTEGER on insert and compares it as a number) and keep NULL as null. Where a parameter is compared with an
+    expression that has no affinity (json_extract), the SQL casts it explicitly."""
     if v is None:
         return None
     if isinstance(v, bool):
@@ -71,48 +80,109 @@ class D1Error(StorageError):
     pass
 
 
+def _retry_after(r) -> float | None:
+    v = r.headers.get("retry-after")
+    try:
+        return max(0.0, float(v)) if v is not None else None
+    except ValueError:
+        return None                               # an HTTP date: fall back to the backoff schedule
+
+
 class D1Client:
-    def __init__(self, account_id: str, database_id: str, api_token: str, *, transport=None, timeout: float = 10.0,
-                 retries: int = 3, backoff_s: float = 0.5, sleep: Callable[[float], None] = time.sleep):
+    """REST client with short timeouts, at most `retries` retries (honouring Retry-After), a circuit breaker, and
+    the per-request deadline from evade.storage.base.storage_deadline."""
+
+    def __init__(self, account_id: str, database_id: str, api_token: str, *, transport=None, timeout: float = 5.0,
+                 connect_timeout: float = 3.0, retries: int = 2, backoff_s: float = 0.5, max_retry_after_s: float = 5.0,
+                 breaker_threshold: int = 5, breaker_cooldown_s: float = 30.0,
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
         import httpx
         self._httpx = httpx
         self._url = D1_URL.format(account=account_id, db=database_id)
         self.__token = api_token
-        self._client = httpx.Client(timeout=httpx.Timeout(timeout), transport=transport)
-        self.retries, self.backoff_s, self._sleep = retries, backoff_s, sleep
+        self.timeout, self.connect_timeout = float(timeout), float(connect_timeout)
+        self._client = httpx.Client(timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout), transport=transport)
+        self.retries, self.backoff_s, self.max_retry_after_s = retries, backoff_s, max_retry_after_s
+        self.breaker_threshold, self.breaker_cooldown_s = breaker_threshold, breaker_cooldown_s
+        self._sleep, self._clock = sleep, clock
+        self._blk = threading.Lock()
+        self._fails = 0
+        self._open_until = 0.0
 
     def __repr__(self) -> str:
         return "D1Client(<redacted>)"
+
+    # ---- circuit breaker: after `breaker_threshold` consecutive failed attempts, fail fast for the cooldown ----
+    def _breaker_check(self) -> None:
+        with self._blk:
+            if self._clock() < self._open_until:
+                raise D1Error("D1 circuit open after repeated failures; failing fast")
+
+    def _breaker_record(self, ok: bool) -> None:
+        with self._blk:
+            if ok:
+                self._fails, self._open_until = 0, 0.0
+                return
+            self._fails += 1
+            if self._fails >= self.breaker_threshold:
+                if self._open_until <= self._clock():
+                    log.error("D1 circuit opened for %.0f s after %d consecutive failures",
+                              self.breaker_cooldown_s, self._fails)
+                self._open_until = self._clock() + self.breaker_cooldown_s
 
     def _post(self, body: dict) -> list[dict]:
         httpx = self._httpx
         last = "no attempt"
         for attempt in range(self.retries + 1):
-            if attempt:
-                self._sleep(min(self.backoff_s * 2 ** (attempt - 1), 8.0))
+            self._breaker_check()
+            rem = deadline_remaining()
+            if rem is not None and rem <= 0:
+                raise D1Error(f"storage deadline exceeded ({last})")
+            kw = {} if rem is None else {"timeout": httpx.Timeout(min(self.timeout, rem),
+                                                                   connect=min(self.connect_timeout, rem))}
+            wait = self.backoff_s * 2 ** attempt
             try:
-                r = self._client.post(self._url, json=body, headers={"Authorization": f"Bearer {self.__token}"})
+                r = self._client.post(self._url, json=body, headers={"Authorization": f"Bearer {self.__token}"}, **kw)
             except httpx.TransportError as e:
                 last = f"transport error: {type(e).__name__}"
+                self._breaker_record(False)
                 log.warning("D1 request failed (%s), attempt %d", last, attempt + 1)
-                continue
-            if r.status_code == 429 or r.status_code >= 500:
-                last = f"HTTP {r.status_code}"
-                log.warning("D1 request failed (%s), attempt %d", last, attempt + 1)
-                continue
-            try:
-                data = r.json()
-            except ValueError:
-                raise D1Error(f"D1 returned HTTP {r.status_code} with a non-JSON body") from None
-            if r.status_code >= 400 or not data.get("success", False):
-                errs = "; ".join(f"{e.get('code')}: {e.get('message')}" for e in data.get("errors", []) or [])
-                raise D1Error(f"D1 query failed (HTTP {r.status_code}): {errs or 'no error detail'}")
-            res = data.get("result") or []
-            for item in res:
-                if isinstance(item, dict) and item.get("success") is False:
-                    raise D1Error("D1 statement failed")
-            return res
+            else:
+                if r.status_code == 429 or r.status_code >= 500:
+                    last = f"HTTP {r.status_code}"
+                    self._breaker_record(False)
+                    log.warning("D1 request failed (%s), attempt %d", last, attempt + 1)
+                    ra = _retry_after(r)
+                    if ra is not None:
+                        if ra > self.max_retry_after_s:
+                            raise D1Error(f"D1 asked to retry after {ra:.0f} s ({last}); not waiting")
+                        wait = max(wait, ra)
+                else:
+                    self._breaker_record(True)        # reachable: a 4xx is a request problem, not an outage
+                    return self._parse(r)
+            if attempt == self.retries:
+                break
+            wait = min(wait, 8.0)
+            rem = deadline_remaining()
+            if rem is not None and wait >= rem:
+                raise D1Error(f"storage deadline exceeded ({last})")
+            self._sleep(wait)
         raise D1Error(f"D1 unavailable after {self.retries + 1} attempts ({last})")
+
+    @staticmethod
+    def _parse(r) -> list[dict]:
+        try:
+            data = r.json()
+        except ValueError:
+            raise D1Error(f"D1 returned HTTP {r.status_code} with a non-JSON body") from None
+        if r.status_code >= 400 or not data.get("success", False):
+            errs = "; ".join(f"{e.get('code')}: {e.get('message')}" for e in data.get("errors", []) or [])
+            raise D1Error(f"D1 query failed (HTTP {r.status_code}): {errs or 'no error detail'}")
+        res = data.get("result") or []
+        for item in res:
+            if isinstance(item, dict) and item.get("success") is False:
+                raise D1Error("D1 statement failed")
+        return res
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
         res = self._post({"sql": sql, "params": [_val(p) for p in params]})
@@ -150,11 +220,14 @@ class R2Blobs:
             raise StorageConfigError("boto3 is required for R2 blobs: pip install boto3") from None
         s3 = boto3.client("s3", endpoint_url=endpoint or f"https://{account_id}.r2.cloudflarestorage.com",
                           aws_access_key_id=access_key_id, aws_secret_access_key=secret_access_key, region_name="auto",
-                          config=Config(signature_version="s3v4", connect_timeout=5, read_timeout=30,
-                                        retries={"max_attempts": 4, "mode": "standard"}))
+                          config=Config(signature_version="s3v4", connect_timeout=3, read_timeout=10,
+                                        retries={"max_attempts": 3, "mode": "standard"}))
         return cls(bucket, s3)
 
     def _call(self, what: str, fn, **kw):
+        rem = deadline_remaining()
+        if rem is not None and rem <= 0:
+            raise StorageError(f"R2 {what} skipped: storage deadline exceeded")
         try:
             return fn(Bucket=self.bucket, **kw)
         except Exception as e:                   # noqa: BLE001 - botocore errors carry no secrets, but keep it short
@@ -201,6 +274,7 @@ class CloudflareBackend(Storage):
     def __init__(self, d1: D1Client, blobs: R2Blobs | None = None, store_raw_windows: bool = False):
         super().__init__(store_raw_windows)
         self.d1, self.blobs = d1, blobs
+        self._tl = threading.local()             # per-thread write buffer for buffered()
 
     def __repr__(self) -> str:
         return f"CloudflareBackend(blobs={'yes' if self.blobs else 'no'})"
@@ -208,72 +282,172 @@ class CloudflareBackend(Storage):
     def has_blobs(self) -> bool:
         return self.blobs is not None
 
-    def _insert_many(self, sql_head: str, cols: int, rows: list[tuple], tail: str = "") -> None:
-        per = max(1, MAX_PARAMS // cols)
+    # ---- writes: sent now, or collected by buffered() and sent as one batch ----
+    def _write(self, stmts: list[tuple[str, list]]) -> None:
+        if not stmts:
+            return
+        buf = getattr(self._tl, "buf", None)
+        if buf is not None:
+            buf.extend(stmts)
+            return
+        self._send(stmts)
+
+    def _send(self, stmts: list[tuple[str, list]]) -> None:
+        if len(stmts) == 1:
+            self.d1.query(*stmts[0])
+            return
+        for j in range(0, len(stmts), STMTS_PER_CALL):
+            self.d1.batch(stmts[j:j + STMTS_PER_CALL])
+
+    @contextlib.contextmanager
+    def buffered(self) -> Iterator[None]:
+        if getattr(self._tl, "buf", None) is not None:      # nested: the outer block sends
+            yield
+            return
+        self._tl.buf = []
+        try:
+            yield
+            stmts = self._tl.buf
+        finally:
+            self._tl.buf = None
+        self._send(stmts)
+
+    @staticmethod
+    def _guarded_rows(head: str, cols: int, rows: list[tuple], user_id: str, tail: str = "",
+                      extra_where: str = "") -> list[tuple[str, list]]:
+        """Multi-row INSERT ... SELECT ... FROM (VALUES ...) AS v WHERE NOT EXISTS (tombstone) [extra], chunked so each
+        statement binds at most MAX_PARAMS parameters (one is the user hash). The VALUES columns are v.column1..N."""
+        per = max(1, (MAX_PARAMS - 1) // cols)
         ph = "(" + ",".join("?" * cols) + ")"
-        stmts = []
+        out = []
         for i in range(0, len(rows), per):
             chunk = rows[i:i + per]
-            stmts.append((f"{sql_head} VALUES {','.join([ph] * len(chunk))} {tail}".strip(),
-                          [v for r in chunk for v in r]))
-        for j in range(0, len(stmts), 20):           # several statements per HTTP call
-            self.d1.batch(stmts[j:j + 20])
+            sql = (f"{head} SELECT * FROM (VALUES {','.join([ph] * len(chunk))}) AS v WHERE {NOT_TOMB}"
+                   f"{extra_where} {tail}")
+            out.append((sql.strip(), [x for r in chunk for x in r] + [user_hash(user_id)]))
+        return out
 
-    # ---- deletion: tombstone first, then every table ----
+    # ---- deletion: tombstone and pending marker first, then every table; marker cleared after the blobs ----
     def _delete_user(self, user_id):
-        stmts = [("INSERT OR IGNORE INTO tombstones (user_hash, deleted_at) VALUES (?, ?)", [user_hash(user_id), time.time()])]
+        h, now = user_hash(user_id), time.time()
+        stmts = [("INSERT OR IGNORE INTO tombstones (user_hash, deleted_at) VALUES (?, ?)", [h, now]),
+                 ("INSERT OR IGNORE INTO pending_deletions (user_hash, started_at) VALUES (?, ?)", [h, now])]
         stmts += [(f"DELETE FROM {t} WHERE user_id = ?", [user_id]) for t in USER_TABLES]
+        if not self.has_blobs():
+            stmts.append(("DELETE FROM pending_deletions WHERE user_hash = ?", [h]))
         self.d1.batch(stmts)
         return {t: "deleted" for t in USER_TABLES}
 
+    def _finish_delete(self, user_id):
+        if self.has_blobs():
+            self.d1.query("DELETE FROM pending_deletions WHERE user_hash = ?", [user_hash(user_id)])
+
     def is_tombstoned(self, user_id: str) -> bool:
         return bool(self.d1.query("SELECT 1 AS x FROM tombstones WHERE user_hash = ?", [user_hash(user_id)]))
+
+    def deletion_incomplete(self, user_id: str) -> bool:
+        return bool(self.d1.query("SELECT 1 AS x FROM pending_deletions WHERE user_hash = ?", [user_hash(user_id)]))
 
     # ---- users ----
     def _put_user(self, user_id, attrs):
         a = dict(attrs)
         created = float(a.pop("created_at", time.time()))
-        self.d1.query("INSERT INTO users (user_id, created_at, attrs) SELECT ?, ?, ? "
-                      "WHERE NOT EXISTS (SELECT 1 FROM tombstones WHERE user_hash = ?) "
-                      "ON CONFLICT (user_id) DO UPDATE SET attrs = excluded.attrs",
-                      [user_id, created, _dumps(a), user_hash(user_id)])
+        self._write([("INSERT INTO users (user_id, created_at, attrs) SELECT ?, ?, ? "
+                      f"WHERE {NOT_TOMB} ON CONFLICT (user_id) DO UPDATE SET attrs = excluded.attrs",
+                      [user_id, created, _dumps(a), user_hash(user_id)])])
 
-    def _get_user(self, user_id):
-        rows = self.d1.query("SELECT created_at, attrs FROM users WHERE user_id = ?", [user_id])
+    @staticmethod
+    def _user_row(rows):
         if not rows:
             return None
         return {"created_at": rows[0]["created_at"], **json.loads(rows[0]["attrs"] or "{}")}
 
-    # ---- baselines ----
-    def _put_baselines(self, records):
-        now = time.time()
-        rows = [(r["user_id"], r["modality"], r["metric"], r["baseline_id"], r.get("mode"), r.get("phase"), r["status"],
-                 _dumps(r.get("values", [])), r.get("center"), r.get("spread"), r.get("created"), now) for r in records]
-        self._insert_many("INSERT INTO baselines (user_id, modality, metric, baseline_id, mode, phase, status, vals, "
-                          "center, spread, created_at, updated_at)", 12, rows,
-                          "ON CONFLICT (user_id, modality, metric) DO UPDATE SET baseline_id = excluded.baseline_id, "
-                          "mode = excluded.mode, phase = excluded.phase, status = excluded.status, vals = excluded.vals, "
-                          "center = excluded.center, spread = excluded.spread, updated_at = excluded.updated_at")
+    def _get_user(self, user_id):
+        return self._user_row(self.d1.query("SELECT created_at, attrs FROM users WHERE user_id = ?", [user_id]))
 
-    def _get_baselines(self, user_id):
-        rows = self.d1.query("SELECT modality, metric, baseline_id, mode, phase, status, vals, center, spread, created_at "
-                             "FROM baselines WHERE user_id = ?", [user_id])
+    def load_user(self, user_id: str, risk_keep: int = 100) -> dict | None:
+        """One D1 request: tombstone check, user, baselines, state, devices, the last `risk_keep` risk points and the
+        newest point at least 7 days old."""
+        if self.is_deleted(user_id, check_remote=False):
+            return None
+        res = self.d1.batch([
+            ("SELECT 1 AS x FROM tombstones WHERE user_hash = ?", [user_hash(user_id)]),
+            ("SELECT created_at, attrs FROM users WHERE user_id = ?", [user_id]),
+            (self._BASELINE_SQL, [user_id]),
+            ("SELECT key, value FROM user_state WHERE user_id = ?", [user_id]),
+            ("SELECT device_id, rec FROM devices WHERE user_id = ?", [user_id]),
+            (f"SELECT t, r_mdtr FROM risk_results WHERE user_id = ? ORDER BY t DESC LIMIT {int(risk_keep)}", [user_id]),
+            ("SELECT t, r_mdtr FROM risk_results WHERE user_id = ? AND t <= ? ORDER BY t DESC LIMIT 1",
+             [user_id, time.time() - WEEK_S]),
+        ])
+        if res[0]:
+            with self._tlock:
+                self._tomb.add(user_id)
+            return None
+        rec = self._user_row(res[1])
+        if rec is None:
+            return None
+        recent = [(r["t"], r["r_mdtr"]) for r in reversed(res[5])]
+        old = [(r["t"], r["r_mdtr"]) for r in res[6]]
+        hist = sorted(set(old + recent))
+        return {"user": rec, "baselines": self._baseline_rows(user_id, res[2]),
+                "state": {r["key"]: json.loads(r["value"]) for r in res[3]},
+                "devices": {r["device_id"]: json.loads(r["rec"]) for r in res[4]},
+                "risk": trim_history(hist, risk_keep)}
+
+    # ---- baselines ----
+    _BASELINE_SQL = ("SELECT modality, metric, baseline_id, mode, phase, status, vals, center, spread, created_at "
+                     "FROM baselines WHERE user_id = ?")
+
+    def _put_baselines(self, records):
+        """Upsert, never for a tombstoned user and never for a baseline_id already archived (a stale flush racing a
+        reset is ignored)."""
+        now = time.time()
+        by_user: dict[str, list] = {}
+        for r in records:
+            by_user.setdefault(r["user_id"], []).append(
+                (r["user_id"], r["modality"], r["metric"], r["baseline_id"], r.get("mode"), r.get("phase"), r["status"],
+                 _dumps(r.get("values", [])), r.get("center"), r.get("spread"), r.get("created"), now))
+        stmts = []
+        for uid, rows in by_user.items():
+            stmts += self._guarded_rows(
+                "INSERT INTO baselines (user_id, modality, metric, baseline_id, mode, phase, status, vals, center, "
+                "spread, created_at, updated_at)", 12, rows, uid,
+                "ON CONFLICT (user_id, modality, metric) DO UPDATE SET baseline_id = excluded.baseline_id, "
+                "mode = excluded.mode, phase = excluded.phase, status = excluded.status, vals = excluded.vals, "
+                "center = excluded.center, spread = excluded.spread, updated_at = excluded.updated_at",
+                " AND NOT EXISTS (SELECT 1 FROM baseline_archive a WHERE a.baseline_id = v.column4)")
+        self._write(stmts)
+
+    @staticmethod
+    def _baseline_rows(user_id, rows):
         return [{"user_id": user_id, "modality": r["modality"], "metric": r["metric"], "baseline_id": r["baseline_id"],
                  "mode": r["mode"], "phase": r["phase"], "status": r["status"], "values": json.loads(r["vals"] or "[]"),
                  "center": r["center"], "spread": r["spread"], "created": r["created_at"]} for r in rows]
 
-    def _archive_baselines(self, user_id, modality):
-        self.d1.batch([
+    def _get_baselines(self, user_id):
+        return self._baseline_rows(user_id, self.d1.query(self._BASELINE_SQL, [user_id]))
+
+    def _archive_baselines(self, user_id, modality, records):
+        now = time.time()
+        rows = [(r["baseline_id"], user_id, modality, r["metric"], r.get("mode"), r.get("phase"),
+                 _dumps(r.get("values", [])), r.get("center"), r.get("spread"), r.get("created"), now)
+                for r in records if r.get("modality", modality) == modality]
+        stmts = self._guarded_rows("INSERT OR IGNORE INTO baseline_archive (baseline_id, user_id, modality, metric, mode, "
+                                   "phase, vals, center, spread, created_at, archived_at)", 11, rows, user_id) if rows else []
+        stmts += [
             ("INSERT OR IGNORE INTO baseline_archive (baseline_id, user_id, modality, metric, mode, phase, vals, center, "
              "spread, created_at, archived_at) SELECT baseline_id, user_id, modality, metric, mode, phase, vals, center, "
-             "spread, created_at, ? FROM baselines WHERE user_id = ? AND modality = ?", [time.time(), user_id, modality]),
-            ("DELETE FROM baselines WHERE user_id = ? AND modality = ?", [user_id, modality])])
+             f"spread, created_at, ? FROM baselines WHERE user_id = ? AND modality = ? AND {NOT_TOMB}",
+             [now, user_id, modality, user_hash(user_id)]),
+            ("DELETE FROM baselines WHERE user_id = ? AND modality = ?", [user_id, modality])]
+        self._write(stmts)
 
     # ---- state ----
     def _put_state(self, user_id, key, value):
-        self.d1.query("INSERT INTO user_state (user_id, key, value, updated_at) VALUES (?, ?, ?, ?) "
-                      "ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                      [user_id, key, _dumps(value), time.time()])
+        self._write([("INSERT INTO user_state (user_id, key, value, updated_at) SELECT ?, ?, ?, ? "
+                      f"WHERE {NOT_TOMB} ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value, "
+                      "updated_at = excluded.updated_at", [user_id, key, _dumps(value), time.time(), user_hash(user_id)])])
 
     def _get_state(self, user_id):
         rows = self.d1.query("SELECT key, value FROM user_state WHERE user_id = ?", [user_id])
@@ -282,9 +456,10 @@ class CloudflareBackend(Storage):
     # ---- inputs, flags, risk ----
     def _add_inputs(self, user_id, rows):
         now = time.time()
-        self._insert_many("INSERT OR IGNORE INTO inputs (input_id, user_id, kind, t_utc, meta, blob_key, created_at)", 7,
-                          [(uuid.uuid4().hex, user_id, r["kind"], r.get("t_utc"), _dumps(r.get("meta", {})),
-                            r.get("blob_key"), now) for r in rows])
+        self._write(self._guarded_rows(
+            "INSERT OR IGNORE INTO inputs (input_id, user_id, kind, t_utc, meta, blob_key, created_at)", 7,
+            [(uuid.uuid4().hex, user_id, r["kind"], r.get("t_utc"), _dumps(r.get("meta", {})), r.get("blob_key"), now)
+             for r in rows], user_id))
 
     def _list_inputs(self, user_id):
         rows = self.d1.query("SELECT input_id, kind, t_utc, meta, blob_key FROM inputs WHERE user_id = ? "
@@ -292,19 +467,20 @@ class CloudflareBackend(Storage):
         return [{**r, "meta": json.loads(r["meta"] or "{}")} for r in rows]
 
     def _add_flags(self, user_id, flags):
-        self._insert_many("INSERT OR IGNORE INTO flags (flag_id, user_id, t, domain, metric, modality, level, z, "
-                          "component_score, confidence)", 10,
-                          [(uuid.uuid4().hex, user_id, f.get("t", time.time()), f.get("domain"), f.get("metric"),
-                            f.get("modality"), f.get("level"), f.get("z"), f.get("component_score"), f.get("confidence"))
-                           for f in flags])
+        self._write(self._guarded_rows(
+            "INSERT OR IGNORE INTO flags (flag_id, user_id, t, domain, metric, modality, level, z, component_score, "
+            "confidence)", 10,
+            [(uuid.uuid4().hex, user_id, f.get("t", time.time()), f.get("domain"), f.get("metric"), f.get("modality"),
+              f.get("level"), f.get("z"), f.get("component_score"), f.get("confidence")) for f in flags], user_id))
 
     def _list_flags(self, user_id):
         return self.d1.query("SELECT t, domain, metric, modality, level, z, component_score, confidence FROM flags "
                              "WHERE user_id = ? ORDER BY t", [user_id])
 
     def _add_risk(self, user_id, t, r_mdtr, band, summary):
-        self.d1.query("INSERT OR IGNORE INTO risk_results (risk_id, user_id, t, r_mdtr, band, summary) "
-                      "VALUES (?, ?, ?, ?, ?, ?)", [uuid.uuid4().hex, user_id, t, r_mdtr, band, _dumps(summary)])
+        self._write([("INSERT OR IGNORE INTO risk_results (risk_id, user_id, t, r_mdtr, band, summary) "
+                      f"SELECT ?, ?, ?, ?, ?, ? WHERE {NOT_TOMB}",
+                      [uuid.uuid4().hex, user_id, t, r_mdtr, band, _dumps(summary), user_hash(user_id)])])
 
     def _risk_history(self, user_id):
         rows = self.d1.query("SELECT t, r_mdtr FROM risk_results WHERE user_id = ? ORDER BY t", [user_id])
@@ -312,16 +488,28 @@ class CloudflareBackend(Storage):
 
     # ---- devices ----
     def _put_device(self, device_id, rec):
-        self.d1.query("INSERT INTO devices (device_id, user_id, rec, updated_at) VALUES (?, ?, ?, ?) "
-                      "ON CONFLICT (device_id) DO UPDATE SET user_id = excluded.user_id, rec = excluded.rec, "
-                      "updated_at = excluded.updated_at", [device_id, rec["user_id"], _dumps(rec), time.time()])
+        self._write([("INSERT INTO devices (device_id, user_id, rec, updated_at) SELECT ?, ?, ?, ? "
+                      f"WHERE {NOT_TOMB} ON CONFLICT (device_id) DO UPDATE SET user_id = excluded.user_id, "
+                      "rec = excluded.rec, updated_at = excluded.updated_at",
+                      [device_id, rec["user_id"], _dumps(rec), time.time(), user_hash(rec["user_id"])])])
+
+    def _update_device(self, device_id, rec):
+        # json_extract has no affinity and params arrive as text, so both sides are cast to INTEGER
+        self._write([("UPDATE devices SET rec = ?, updated_at = ? WHERE device_id = ? AND user_id = ? "
+                      "AND COALESCE(CAST(json_extract(rec, '$.last_seq') AS INTEGER), -1) < CAST(? AS INTEGER) "
+                      f"AND {NOT_TOMB}",
+                      [_dumps(rec), time.time(), device_id, rec["user_id"], int(rec.get("last_seq", -1)),
+                       user_hash(rec["user_id"])])])
 
     def _get_device(self, device_id):
         rows = self.d1.query("SELECT rec FROM devices WHERE device_id = ?", [device_id])
         return json.loads(rows[0]["rec"]) if rows else None
 
-    def _delete_device(self, device_id):
-        self.d1.query("DELETE FROM devices WHERE device_id = ?", [device_id])
+    def _delete_device(self, device_id, user_id=None):
+        if user_id is None:
+            self._write([("DELETE FROM devices WHERE device_id = ?", [device_id])])
+        else:
+            self._write([("DELETE FROM devices WHERE device_id = ? AND user_id = ?", [device_id, user_id])])
 
     def _devices_for_user(self, user_id):
         rows = self.d1.query("SELECT device_id, rec FROM devices WHERE user_id = ?", [user_id])
