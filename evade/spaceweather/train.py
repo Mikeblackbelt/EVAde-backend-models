@@ -344,15 +344,21 @@ def run(a) -> dict:
                                for k, v in d.items()}), flush=True)
     print("cme_minus_goes_ci", json.dumps(cme_ci), flush=True)
 
-    # pre-stated serving rule: the CME model is served only if the CI shows a Brier gain on the whole test period
-    ci_b = cme_ci["test_all"]["brier_b_minus_a"]
-    served = "goes_cme_bgcorr" if ci_b and ci_b[1] < 0 else "goes_bgcorr"
-    ids = dict(zip(("goes_bgcorr", "cme_arch", "goes_cme_bgcorr"), a.ids.split(",")))
+    # serving: the uncorrected GOES model by default (it scored better and the correction failed its overlap check);
+    # --background-correction serves the corrected one, or the CME one if its Brier gain is significant
+    models["goes_no_bgcorr"], cols["goes_no_bgcorr"] = m_raw, FEATURES
+    if a.background_correction:
+        ci_b = cme_ci["test_all"]["brier_b_minus_a"]
+        served = "goes_cme_bgcorr" if ci_b and ci_b[1] < 0 else "goes_bgcorr"
+    else:
+        served = "goes_no_bgcorr"
+    ids = dict(zip(("goes_bgcorr", "cme_arch", "goes_cme_bgcorr", "goes_no_bgcorr"), a.ids.split(",")))
     out = Path(a.out).expanduser() / "spaceweather"
     out.mkdir(parents=True, exist_ok=True)
     import joblib
     import sklearn
-    joblib.dump({"estimator": models[served], "platt": None, "background": table}, out / "model.joblib")  # own artifact
+    joblib.dump({"estimator": models[served], "platt": None,
+                 "background": None if served == "goes_no_bgcorr" else table}, out / "model.joblib")  # own artifact
     (out / "feature_names.json").write_text(json.dumps(cols[served]))
     (out / "background.json").write_text(json.dumps(table, indent=1))
     m = {"task": TASK, "model_id": ids[served], "served": served, "ids": ids, "split": a.split,
@@ -367,7 +373,7 @@ def run(a) -> dict:
          "runtime_s": round(time.time() - t_start, 1), "smoke": bool(a.smoke)}
     (out / "metrics.json").write_text(json.dumps(m, indent=1, default=str))
     (out / "provenance.json").write_text(json.dumps(prov, indent=0))
-    man = {"task": TASK, "model_id": ids[served], "arch_id": "EVA-7" if served == "goes_bgcorr" else ids["cme_arch"],
+    man = {"task": TASK, "model_id": ids[served], "arch_id": ids["cme_arch"] if served == "goes_cme_bgcorr" else "EVA-7",
            "status": "draft", "format": "joblib",
            "contents": "dict(estimator=sklearn logistic pipeline, platt=None, background=table)", "version": "0.2.0",
            "feature_count": len(cols[served]),
@@ -392,7 +398,10 @@ def main(argv=None) -> int:
     p.add_argument("--goesr-last", default=None)
     p.add_argument("--split", default="2017-01-01")
     p.add_argument("--boot", type=int, default=300)
-    p.add_argument("--ids", default="EVA-9,EVA-10,EVA-11", help="GOES-only model, CME arch, CME model")
+    p.add_argument("--ids", default="EVA-9,EVA-10,EVA-11,EVA-12",
+                   help="corrected GOES model, CME arch, CME model, uncorrected GOES model")
+    p.add_argument("--background-correction", action="store_true",
+                   help="serve the background-corrected model (off by default: it did not help)")
     p.add_argument("--swpc-live", action="store_true", help="estimate the live SWPC feed background (network)")
     p.add_argument("--commit", default=None)
     p.add_argument("--smoke", action="store_true", help="2003 plus a few GOES-R months, few bootstrap reps")
