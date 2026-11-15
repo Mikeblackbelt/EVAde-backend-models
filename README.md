@@ -25,7 +25,8 @@ Backend models for **EVAde**, a space health monitoring platform that helps astr
 | [evade/preprocessing/](evade/preprocessing/README.md) | Loaders and preprocessing for the open datasets (filtering, 250 Hz, windows, quality, labels, subject-wise folds) |
 | [evade/training/](evade/training/README.md) | Beta training (seizure-suspect windows, sleep staging, PTB-XL superclass) with subject-wise results and baselines |
 | `evade/risk/`, `evade/baseline/` | Risk score v2 and maximum days to return (reproduces the worked examples); per-user baseline store and comparison |
-| [evade/api/](evade/api/README.md) | FastAPI service: users, baselines, compare, ECG/EEG/radiation/risk prediction, self-report, PHQ-9/GAD-7, devices and ingest |
+| [evade/spaceweather/](evade/spaceweather/README.md) | Space-weather inputs for the radiation domain: provider interface (NOAA SWPC reference, file replay; "what your API needs to return"), NASA DONKI events, NOAA-scale nowcast, SPE onset forecast (EVA-7..EVA-12, draft; EVA-12 served, tested on GOES-R 2020-2026), optional per-satellite background correction, crew dose-rate estimate |
+| [evade/api/](evade/api/README.md) | FastAPI service: users, baselines, compare, ECG/EEG/radiation/space-weather/risk prediction, self-report, PHQ-9/GAD-7, devices and ingest |
 | `tests/` | Unit and API contract tests (`python -m pytest -q tests`) |
 | [MODEL_REGISTRY.md](MODEL_REGISTRY.md) | Every retained model architecture and trained model gets a unique ID `EVA-[n]`, numbered in order of creation. |
 | `external/Blindsight-Data-Nasa` | The team's earlier prototype, added as a git submodule (pinned commit, no license, so referenced and not copied). Run `git submodule update --init` to fetch it. |

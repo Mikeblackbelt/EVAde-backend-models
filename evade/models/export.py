@@ -88,6 +88,12 @@ def headline_from_metrics(task: str, m: dict) -> dict:
             h = m["leave_one_subject_out"]
             return {"subject_kappa_ci": h["hgb"]["subject_kappa_ci"],
                     "logreg_baseline_kappa_ci": h["logreg_baseline"]["subject_kappa_ci"]}
+        if task == "spaceweather":
+            mm, s = m.get("metrics", {}), m.get("served")
+            pick = lambda era, k: {x: mm.get(era, {}).get(k, {}).get(x) for x in ("brier", "auroc")}  # noqa: E731
+            return {"test_range": m.get("test_range"), "test_all": pick("test_all", s),
+                    "test_all_persistence": pick("test_all", "persistence"), "goesr_era": pick("goesr_era", s),
+                    "goesr_era_persistence": pick("goesr_era", "persistence")}
     except (KeyError, TypeError):
         return {}
     return {}

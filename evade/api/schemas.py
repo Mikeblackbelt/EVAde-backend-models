@@ -160,6 +160,79 @@ class RadiationRequest(BaseModel):
         return _not_future(v)
 
 
+SPACEWX_MAX_AGE_DAYS = 7      # posted observations must be recent (the model looks back 48 h)
+SPACEWX_MAX_SPAN_H = 96       # and span at most 4 days, so time span cannot blow up the hourly grid
+
+
+class SpaceWeatherObs(BaseModel):
+    """One normalized observation (evade/spaceweather/schema.py FIELDS); every value is optional."""
+    t_utc: datetime
+    proton_10mev_pfu: float | None = Field(None, ge=0, le=1e7)
+    proton_50mev_pfu: float | None = Field(None, ge=0, le=1e7)
+    proton_100mev_pfu: float | None = Field(None, ge=0, le=1e7)
+    xray_long_wm2: float | None = Field(None, ge=0, le=0.1)
+    xray_short_wm2: float | None = Field(None, ge=0, le=0.1)
+    kp: float | None = Field(None, ge=0, le=9)
+    sw_speed_kms: float | None = Field(None, ge=0, le=5000)
+    sw_density_cm3: float | None = Field(None, ge=0, le=1000)
+    bz_gsm_nt: float | None = Field(None, ge=-500, le=500)
+    dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
+    proton_satellite: int | None = Field(None, ge=1, le=99, description="GOES number of the proton values")
+
+    @field_validator("t_utc")
+    @classmethod
+    def check_time(cls, v):
+        return _recent(v)
+
+
+def _recent(v: datetime) -> datetime:
+    v = _not_future(v)
+    if v < datetime.now(timezone.utc) - timedelta(days=SPACEWX_MAX_AGE_DAYS):
+        raise ValueError(f"t_utc older than {SPACEWX_MAX_AGE_DAYS} days")
+    return v
+
+
+class CmeIn(BaseModel):
+    """One CME (as DONKI gives it): time it was observed, speed and angular half-width."""
+    t_utc: datetime
+    speed_kms: float = Field(ge=0, le=5000)
+    half_angle_deg: float | None = Field(None, ge=0, le=180)
+    earth_directed: bool | None = None
+
+    @field_validator("t_utc")
+    @classmethod
+    def check_time(cls, v):
+        return _recent(v)
+
+
+class SpaceWeatherRequest(BaseModel):
+    user_id: str
+    provider: Literal["noaa_swpc", "replay"] | None = Field(None, description="server-side provider by name; or send observations")
+    observations: list[SpaceWeatherObs] | None = Field(None, max_length=5000)
+    location: Literal["deep_space", "lunar_surface", "mars_surface", "leo_iss"] = "deep_space"
+    shielding: Literal["eva_suit", "spacecraft", "storm_shelter"] = "spacecraft"
+    cumulative_dose_msv: float | None = Field(None, ge=0, le=5000)
+    measured_dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
+    seu_count_last_hour: int = Field(0, ge=0)
+    include_donki: bool = Field(True, description="with provider: also fetch NASA DONKI events (CMEs feed the forecast)")
+    proton_source: Literal["swpc_operational", "ncei_archive"] = Field(
+        "swpc_operational", description="with observations: which product the proton values are (selects the "
+                                        "background floor for proton_satellite)")
+    cmes: list[CmeIn] | None = Field(None, max_length=200, description="with observations: recent CMEs (optional)")
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if (self.provider is None) == (self.observations is None):
+            raise ValueError("give exactly one of provider or observations")
+        if self.observations is not None:
+            if len(self.observations) == 0:
+                raise ValueError("observations must not be empty")
+            ts = [o.t_utc for o in self.observations]
+            if max(ts) - min(ts) > timedelta(hours=SPACEWX_MAX_SPAN_H):
+                raise ValueError(f"observations span more than {SPACEWX_MAX_SPAN_H} h")
+        return self
+
+
 class DomainIn(BaseModel):
     s: float = Field(ge=0, le=1)
     q: float = Field(1.0, ge=0, le=1)
