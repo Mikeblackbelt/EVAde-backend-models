@@ -532,7 +532,41 @@ def test_f12_hydrated_risk_history_is_bounded_but_keeps_the_7_day_point(api, mon
     restart(A, fake, s3, monkeypatch)
     assert C.get(f"/v1/users/{uid}/baseline", headers=H).status_code == 200
     hist = A.STATE.risk_history[uid]
-    assert len(hist) <= 101 and hist[0] == (pytest.approx(now - 8 * 86400), 0.5)
+    assert len(hist) <= 100 + 168 + 1 and len(hist) < 151 and hist[0] == (pytest.approx(now - 8 * 86400), 0.5)
+
+
+def _r7(hist, now):
+    old = [x for x in hist if now - x[0] >= 7 * 86400]
+    return old[-1] if old else None
+
+
+def test_f12_bounded_history_still_answers_the_7_day_lookup_later():
+    from evade.storage.base import bound_history
+    now = 1_000_000_000.0
+    rng = np.random.default_rng(3)
+    full = sorted((now - float(s), 0.5) for s in rng.uniform(0, 10 * 86400, 2000))
+    b = bound_history(full, 100, now)
+    assert len(b) <= 100 + 168 + 1
+    for later in (0.0, 3600.0, 2 * 86400.0, 6.9 * 86400):         # the lookup as the bounded points age
+        exact, got = _r7(full, now + later), _r7(b, now + later)
+        assert got is not None and exact[0] - got[0] <= 3600.0
+
+
+def test_f12_in_memory_history_keeps_the_trend_input(api, monkeypatch):
+    """Over 100 risk calls inside a week must not drop the 7-day trend input (it is bounded on hydrate only)."""
+    C, H, A, st, fake, s3 = api
+    uid = new_user(C, H)
+    clock = [time.time() - 8 * 86400]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    seen = []
+    real = A.mdtr
+    monkeypatch.setattr(A, "mdtr", lambda *a, **k: seen.append(k.get("r_7d_ago")) or real(*a, **k))
+    for i in range(151):
+        r = C.post("/v1/predict/risk", json={"user_id": uid, "domain_inputs": {"cardiac": {"s": 0.1 + i / 1000}},
+                                             "logistics_floor_days": 0.5}, headers=H)
+        assert r.status_code == 200
+        clock[0] += 8 * 86400 / 150
+    assert seen[-1] is not None and len(A.STATE.risk_history[uid]) == 151
 
 
 # ---------------- 13. device last_seq never rewinds ----------------

@@ -64,16 +64,22 @@ def user_hash(user_id: str) -> str:
     return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
 
 
-def trim_history(hist: list, keep: int = 100, now: float | None = None) -> list:
-    """The last `keep` (t, r) points plus the newest point at least 7 days old (the MDTR trend input)."""
-    if len(hist) <= keep:
-        return list(hist)
+def bound_history(hist, keep: int = 100, now: float | None = None) -> list:
+    """Risk history loaded on hydrate, bounded to at most keep + 168 + 1 points: the last `keep` (t, r) points, the
+    newest point of every hour of the last 7 days (they become the 7-day trend input as they age), and the newest
+    point at least 7 days old (the trend input now). Sorted by time."""
     now = time.time() if now is None else now
-    out = list(hist[-keep:])
-    old = [x for x in hist[:-keep] if now - x[0] >= WEEK_S]
-    if old and not any(now - x[0] >= WEEK_S for x in out):
-        out.insert(0, old[-1])
-    return out
+    hist = sorted({(float(t), float(r)) for t, r in hist})
+    out = set(hist[-keep:]) if keep > 0 else set()
+    hourly: dict[int, tuple] = {}
+    for t, r in hist:
+        if now - t < WEEK_S:
+            hourly[int(t // 3600)] = (t, r)      # ascending order: the newest point of each hour wins
+    out |= set(hourly.values())
+    old = [x for x in hist if now - x[0] >= WEEK_S]
+    if old:
+        out.add(old[-1])
+    return sorted(out)
 
 
 class Storage:
@@ -134,7 +140,7 @@ class Storage:
 
     def load_user(self, user_id: str, risk_keep: int = 100) -> dict | None:
         """Everything the API needs to hydrate one user, or None if unknown or tombstoned:
-        {"user", "baselines", "state", "devices", "risk"} with risk bounded by trim_history."""
+        {"user", "baselines", "state", "devices", "risk"} with risk bounded by bound_history."""
         if self.is_deleted(user_id):
             return None
         rec = self._get_user(user_id)
@@ -142,7 +148,7 @@ class Storage:
             return None
         return {"user": rec, "baselines": self._get_baselines(user_id), "state": self._get_state(user_id),
                 "devices": self._devices_for_user(user_id),
-                "risk": trim_history(self._risk_history(user_id), risk_keep)}
+                "risk": bound_history(self._risk_history(user_id), risk_keep)}
 
     # ---- baselines ----
     def put_baselines(self, records: list[dict]) -> None:

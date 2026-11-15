@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from .base import WEEK_S, Storage, StorageConfigError, StorageError, deadline_remaining, trim_history, user_hash
+from .base import WEEK_S, Storage, StorageConfigError, StorageError, deadline_remaining, bound_history, user_hash
 
 log = logging.getLogger("evade.storage")
 D1_URL = "https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{db}/query"
@@ -366,10 +366,12 @@ class CloudflareBackend(Storage):
         return self._user_row(self.d1.query("SELECT created_at, attrs FROM users WHERE user_id = ?", [user_id]))
 
     def load_user(self, user_id: str, risk_keep: int = 100) -> dict | None:
-        """One D1 request: tombstone check, user, baselines, state, devices, the last `risk_keep` risk points and the
-        newest point at least 7 days old."""
+        """One D1 request: tombstone check, user, baselines, state, devices, and the risk history bounded as in
+        bound_history (last `risk_keep` points, newest point per hour of the last 7 days, newest point older)."""
         if self.is_deleted(user_id, check_remote=False):
             return None
+        now = time.time()
+        week_ago = now - WEEK_S
         res = self.d1.batch([
             ("SELECT 1 AS x FROM tombstones WHERE user_hash = ?", [user_hash(user_id)]),
             ("SELECT created_at, attrs FROM users WHERE user_id = ?", [user_id]),
@@ -378,7 +380,9 @@ class CloudflareBackend(Storage):
             ("SELECT device_id, rec FROM devices WHERE user_id = ?", [user_id]),
             (f"SELECT t, r_mdtr FROM risk_results WHERE user_id = ? ORDER BY t DESC LIMIT {int(risk_keep)}", [user_id]),
             ("SELECT t, r_mdtr FROM risk_results WHERE user_id = ? AND t <= ? ORDER BY t DESC LIMIT 1",
-             [user_id, time.time() - WEEK_S]),
+             [user_id, week_ago]),
+            ("SELECT MAX(t) AS t, r_mdtr FROM risk_results WHERE user_id = ? AND t > ? "
+             "GROUP BY CAST(t / 3600 AS INTEGER)", [user_id, week_ago]),
         ])
         if res[0]:
             with self._tlock:
@@ -387,13 +391,11 @@ class CloudflareBackend(Storage):
         rec = self._user_row(res[1])
         if rec is None:
             return None
-        recent = [(r["t"], r["r_mdtr"]) for r in reversed(res[5])]
-        old = [(r["t"], r["r_mdtr"]) for r in res[6]]
-        hist = sorted(set(old + recent))
+        hist = [(r["t"], r["r_mdtr"]) for r in res[5] + res[6] + res[7]]
         return {"user": rec, "baselines": self._baseline_rows(user_id, res[2]),
                 "state": {r["key"]: json.loads(r["value"]) for r in res[3]},
                 "devices": {r["device_id"]: json.loads(r["rec"]) for r in res[4]},
-                "risk": trim_history(hist, risk_keep)}
+                "risk": bound_history(hist, risk_keep, now)}
 
     # ---- baselines ----
     _BASELINE_SQL = ("SELECT modality, metric, baseline_id, mode, phase, status, vals, center, spread, created_at "

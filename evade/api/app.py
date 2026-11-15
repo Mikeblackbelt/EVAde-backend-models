@@ -34,7 +34,6 @@ from ..baseline.store import BaselineStore, domain_scores
 from ..models.export import headline_from_metrics
 from ..models.registry import ModelRegistry
 from ..storage import StorageError, deadline_s, storage_deadline
-from ..storage.base import trim_history
 from ..preprocessing import PIPELINE_VERSION, config
 from ..preprocessing.ecg import detect_qrs, hrv_features, preprocess_ecg
 from ..preprocessing.eeg import bipolar_from_monopolar, preprocess_eeg, select_bipolar
@@ -46,7 +45,7 @@ from . import schemas as S
 API_VERSION = "0.1.0-beta"
 MAX_BODY = 1_000_000
 MAX_SEQ_JUMP = 100_000
-RISK_KEEP = 100            # risk points kept per user (plus the newest one at least 7 days old, for the MDTR trend)
+RISK_KEEP = 100            # risk points loaded per user on hydrate (plus the 7-day trend points, see bound_history)
 MISS_TTL_S, MISS_MAX = 60.0, 10_000
 SOFT_WARNING = "stored in this service only: the storage write failed (it is not retried for this request)"
 ACTIONS = {
@@ -710,9 +709,8 @@ def predict_risk(body: S.RiskRequest):
     now = time.time()
     provisional = bool(warn)
     with STATE.lock:
-        if body.user_id in STATE.users:
-            STATE.risk_history[body.user_id] = trim_history(STATE.risk_history.get(body.user_id, []) + [(now, r.r_mdtr)],
-                                                            RISK_KEEP, now)
+        if body.user_id in STATE.users:          # not trimmed here: the 7-day trend lookup needs the older points
+            STATE.risk_history.setdefault(body.user_id, []).append((now, r.r_mdtr))
     persist_soft(body.user_id, warn, endpoint="predict/risk",
                  risk=(now, r.r_mdtr, r.band, {"r_agg": r.r_agg, "r_disp": r.r_disp, "flag": r.flag,
                                                "flag_domains": r.flag_domains, "override_ids": r.override_ids,
