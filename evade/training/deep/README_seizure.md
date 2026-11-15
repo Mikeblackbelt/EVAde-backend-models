@@ -132,7 +132,7 @@ mkdir -p $PROJECT/slurm
 # 1. download (after hpchelp agreed), on the login node, 1.5-4 h, about 63 GB; re-run after interruptions
 nohup bash $PROJECT/code/evade/training/hpc/seizure_download.sh > $PROJECT/data/seizure_download.log 2>&1 &
 # 2. prep (CPU): smoke, then full (1.5-3 h, 8 cores, 64 GB; output about 23 GB)
-sbatch --export=ALL,SMOKE=1 --time=00:30:00 $PROJECT/code/evade/training/hpc/seizure_prep.sbatch
+sbatch --export=ALL,SMOKE=1 --time=01:00:00 $PROJECT/code/evade/training/hpc/seizure_prep.sbatch
 sbatch $PROJECT/code/evade/training/hpc/seizure_prep.sbatch
 # 3. train (1 GPU): smoke, then full (about 4-5 h on a V100, 12 h requested, 64 GB RAM)
 sbatch --export=ALL,SMOKE=1 --time=00:30:00 --signal=B:USR1@60 $PROJECT/code/evade/training/hpc/seizure_deep.sbatch

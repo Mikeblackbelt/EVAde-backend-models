@@ -3,9 +3,10 @@
 # deep seizure-suspect model: 18-channel bipolar montage, 0.5-45 Hz band-pass, mains notch, 256 Hz, 4 s windows,
 # 2 s step, beta labels and buffers, beta file selection (every seizure file + 3 seizure-free files per subject),
 # per-person median / MAD from that person's non-ictal windows. Output: data/seizure256/{chbmit,siena}/*.npz.
-# Resumable: finished shards are skipped on resubmit.
+# Resumable: finished shards are skipped on resubmit (delete data/seizure256/<dataset> after a parser or
+# --min-channels change, or the old shards are kept).
 # Needs: data/chbmit/VERIFIED and data/siena-scalp-eeg/VERIFIED (seizure_download.sh), pyedflib in the venv.
-#   smoke: sbatch --export=ALL,SMOKE=1 --time=00:30:00 seizure_prep.sbatch     (3 files per case, writes -smoke)
+#   smoke: sbatch --export=ALL,SMOKE=1 --time=01:00:00 seizure_prep.sbatch     (3 files per case, 2 per Siena subject; -smoke)
 #   full:  sbatch seizure_prep.sbatch
 # Estimate: 1.5-3 h on 8 cores; Siena files (up to 1.7 GB, ~13 h at 512 Hz) are packed one subject at a time.
 # Output size: about 13 GB CHB-MIT + 10 GB Siena (float16, uncompressed npz).

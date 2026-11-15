@@ -158,8 +158,8 @@ def augment(x: torch.Tensor, gen: torch.Generator, fs: float) -> torch.Tensor:
     scale = (0.8 + 0.4 * torch.rand(b, 1, 1, generator=gen)).to(x.device)
     shifts = torch.randint(-int(0.5 * fs), int(0.5 * fs) + 1, (b,), generator=gen)
     t = x.shape[2]
-    idx = (torch.arange(t)[None, :] - shifts[:, None]) % t
-    x = torch.gather(x, 2, idx[:, None, :].expand(b, x.shape[1], t).to(x.device))
+    idx = ((torch.arange(t)[None, :] - shifts[:, None]) % t).to(x.device)    # move (b, t), then expand on device
+    x = torch.gather(x, 2, idx[:, None, :].expand(b, x.shape[1], t))
     return x * scale
 
 
