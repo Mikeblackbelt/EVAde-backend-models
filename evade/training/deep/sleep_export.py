@@ -1,6 +1,6 @@
 """Export the deep sleep-staging model to a servable folder (the EVAde model artifact contract).
 
-  python -m evade.training.deep.sleep_export --run <run dir> --out <run dir>/export/sleep [--model-id EVA-n]
+  python -m evade.training.deep.sleep_export --run <run dir> --out <run dir>/export/sleep_deep [--model-id EVA-n]
 
 <run> holds final/ (the exported weights, final/best.pt), kfold/metrics.json (the performance estimate) and
 optionally beta5/metrics.json (the beta-comparable track). Writes model.onnx (dynamo=False; TorchScript model.ts if
@@ -8,12 +8,18 @@ the ONNX exporter fails), feature_names.json (channels), metrics.json and manife
 the input spec (sequence of epochs, normalization rule), the output spec (classes, softmax, operating points).
 If onnxruntime is installed, ONNX parity with PyTorch is checked at a batch size and sequence length different from
 the export trace, and the result goes in the manifest.
+
+The manifest follows the API's sleep_deep contract (evade/api/README_deep_models.md, evade/models/deep_tasks.py
+SleepAdapter): copy the folder to <EVADE_MODEL_DIR>/sleep_deep/. The API reads input.fs_hz (100), input.channels
+(Fpz-Cz, Pz-Oz), input.tensor_shape ["batch", "seq", 2, 3000] (a name for seq: the whole submitted sequence goes in
+one call), input.normalization type "none" (the per-epoch robust z is inside the model, so the API sends raw uV),
+output.classes and output.activation "softmax".
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,7 +38,7 @@ def parity(onnx_path: Path, model, c: int, t: int) -> dict:
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     worst = 0.0
     for b, l in ((1, 20), (3, 7), (2, 33)):
-        x = torch.randn(b, l, c, t)
+        x = 40.0 * torch.randn(b, l, c, t) + 7.0     # microvolt-like scale: exercises the in-graph normalization
         with torch.no_grad():
             ref = model(x).numpy()
         got = sess.run(None, {"x": x.numpy()})[0]
@@ -48,6 +54,8 @@ def main(argv=None) -> int:
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--model-id", default="UNASSIGNED")
     a = p.parse_args(argv)
+    if hasattr(signal, "SIGUSR1"):        # the job's time-limit signal must not kill a short export half-way
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     fin = json.loads((a.run / "final" / "metrics.json").read_text())
     kf = json.loads((a.run / "kfold" / "metrics.json").read_text())
     b5p = a.run / "beta5" / "metrics.json"
@@ -67,14 +75,19 @@ def main(argv=None) -> int:
                           dynamic_axes={"x": {0: "batch", 1: "seq"}, "logits": {0: "batch", 1: "seq"}},
                           opset_version=17, dynamo=False)
         fmt, weights = "onnx", "model.onnx"
-        par = parity(a.out / "model.onnx", model, c, t)
     except Exception as e:  # exporter or onnx package missing: fall back to TorchScript
         why = f"{type(e).__name__}: {e}"
         print(f"onnx export unavailable ({why}); writing TorchScript", flush=True)
+        (a.out / "model.onnx").unlink(missing_ok=True)
         with torch.no_grad():
             torch.jit.trace(model, x).save(str(a.out / "model.ts"))
         fmt, weights = "torchscript", "model.ts"
         par = {"checked": False, "reason": "TorchScript fallback"}
+    if fmt == "onnx":
+        try:
+            par = parity(a.out / "model.onnx", model, c, t)
+        except Exception as e:  # noqa: BLE001  (an onnxruntime error is a parity result, not a failed export)
+            par = {"checked": True, "ok": False, "reason": f"{type(e).__name__}: {e}"}
     with torch.no_grad():
         ref = list(model(torch.randn(1, L, c, t)).shape)
     metrics = {"kfold": kf, "beta5": b5, "final": {k: fin.get(k) for k in ("protocol", "units", "n", "config")}}
@@ -90,21 +103,24 @@ def main(argv=None) -> int:
             "beta5_subject_mean_kappa": (b5 or {}).get("out_of_fold", {}).get("subject_mean_kappa"),
             "beta_baseline": kf.get("baseline_beta")}
     manifest = {
-        "model_id": a.model_id, "task": "sleep_staging", "status": "draft", "format": fmt, "weights": weights,
+        "model_id": a.model_id, "task": "sleep_deep", "status": "draft", "format": fmt, "weights": weights,
         "sha256": files[weights], "files_sha256": files, "onnx_fallback_reason": why, "onnx_parity": par,
         "input": {"kind": "tensor", "modality": "eeg", "fs_hz": cfg["fs_hz"], "channels": cfg["channels"],
                   "edf_labels": [f"EEG {ch}" for ch in cfg["channels"]],
                   "tensor_shape": ["batch", "seq", c, t], "dtype": "float32", "epoch_s": 30,
-                  "seq_len_trained": L, "seq_len_any": True, "unit": "uV before normalization",
+                  "seq_len_trained": L, "seq_len_any": True, "unit": "uV, raw (the model normalizes each epoch)",
                   "filtering": "none (raw Sleep-EDFx 100 Hz signals)",
-                  "normalization": cfg["normalization"] | {
-                      "how_api_computes": "per channel over all 30 s epochs of the night being staged: "
-                                          "x = clip((x - median) / max(1.4826 * MAD, 0.1), -20, 20)"},
-                  "sequence": "consecutive 30 s epochs of one night, in time order; never mix nights"},
-        "output": {"type": "multiclass_sequence", "classes": cfg["classes"], "activation": "softmax over the last axis",
+                  "normalization": cfg["normalization"],
+                  "sequence": "consecutive 30 s epochs of one night, in time order; never mix nights; up to "
+                              f"{L} epochs per call matches training"},
+        "output": {"type": "multiclass", "per": "epoch (sequence output)", "classes": cfg["classes"],
+                   "activation": "softmax", "activation_axis": -1,
                    "logits_shape": ["batch", "seq", len(cfg["classes"])], "example_logits_shape": ref,
-                   "aggregation": f"windows of {L} epochs with stride {cfg['eval_stride']}; softmax averaged per epoch",
+                   "aggregation": f"training evaluation: windows of {L} epochs with stride {cfg['eval_stride']}, "
+                                  "softmax averaged per epoch",
                    "operating_points": kf.get("operating_points", []),
+                   "operating_points_note": "review thresholds set on the k-fold models' out-of-fold softmax; "
+                                            "approximate for the final model",
                    "use": "sleep-stage estimates and total sleep time flagged for human review; not a diagnosis"},
         "code_commit": code_commit(), "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "data": {"dataset": "Sleep-EDFx 1.0.0 sleep-cassette (PhysioNet)", "n_kfold": kf.get("n"),

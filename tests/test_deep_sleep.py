@@ -160,6 +160,26 @@ def test_scores_match_sklearn():
     assert ci["kappa"]["lo"] <= s["kappa"] <= ci["kappa"]["hi"]
 
 
+# ---------------------------------------------------------------- in-model normalization (the serving rule)
+def test_epoch_robust_z_matches_numpy_and_needs_no_night():
+    from evade.training.deep.sleep_models import build, epoch_robust_z
+    rng = np.random.default_rng(4)
+    x = (rng.standard_normal((6, 2, 3000)) * 30 + 5).astype(np.float32)
+    x[2] = 0.0                                                    # flat epoch: floor 0.1, no NaN
+    med = np.median(x, axis=2, keepdims=True)
+    mad = np.median(np.abs(x - med), axis=2, keepdims=True)
+    ref = np.clip((x - med) / np.maximum(1.4826 * mad, 0.1), -20, 20)
+    got = epoch_robust_z(torch.from_numpy(x)).numpy()
+    assert np.allclose(got, ref, atol=1e-4) and np.isfinite(got).all()
+    # an epoch is encoded the same whether it comes alone, in a chunk, or scaled by a gain (unit-free)
+    m = build("cnn_bigru", 2).eval()
+    with torch.no_grad():
+        full = m.encode(torch.from_numpy(x))
+        alone = m.encode(torch.from_numpy(x[4:5]))
+        gain = m.encode(torch.from_numpy(x[4:5] * 3.0 + 10.0))
+    assert torch.allclose(full[4:5], alone, atol=1e-5) and torch.allclose(alone, gain, atol=1e-4)
+
+
 # ---------------------------------------------------------------- end to end
 def _train(npz, run, protocol, *extra):
     return ST.main(["--data", str(npz), "--run", str(run), "--protocol", protocol, "--seq-len", "10", "--bs", "4",
@@ -190,15 +210,23 @@ def test_pipeline_end_to_end(raw, tmp_path):
     assert json.loads((run / "beta5" / "metrics.json").read_text())["protocol"]["subjects"][0] == "SC400"
 
     from evade.training.deep import sleep_export as SE
-    out = run / "export" / "sleep"
-    assert SE.main(["--run", str(run), "--out", str(out), "--model-id", "EVA-TEST"]) == 0
+    out = run / "export" / "sleep_deep"
+    assert SE.main(["--run", str(run), "--out", str(out), "--model-id", "EVA-99"]) == 0
     man = json.loads((out / "manifest.json").read_text())
     import hashlib
     for f, h in man["files_sha256"].items():
         assert hashlib.sha256((out / f).read_bytes()).hexdigest() == h
-    assert man["input"]["tensor_shape"] == ["batch", "seq", 2, 3000]
-    assert man["input"]["normalization"]["type"] == "per_night_channel_robust_z"
-    assert man["output"]["operating_points"] and man["status"] == "draft"
+    # the fields the API's sleep_deep adapter reads (api-model-stubs: evade/models/deep_tasks.py SleepAdapter,
+    # evade/models/manifest.py validate), with the values it accepts
+    assert man["task"] == "sleep_deep" and man["status"] == "draft" and man["format"] in ("onnx", "torchscript")
+    inp, outp = man["input"], man["output"]
+    assert inp["kind"] == "tensor" and inp["modality"] == "eeg" and inp["fs_hz"] == 100
+    assert inp["channels"] == ["Fpz-Cz", "Pz-Oz"] and inp["tensor_shape"] == ["batch", "seq", 2, 3000]
+    assert inp["normalization"]["type"] == "none"                      # the API sends raw uV
+    assert inp["normalization"]["in_model"]["type"] == "per_epoch_channel_robust_z"
+    assert outp["type"] in ("binary", "multiclass", "multilabel", "regression")
+    assert outp["activation"] == "softmax" and outp["classes"] == SP.CLASSES
+    assert outp["operating_points"]
     try:
         import onnxruntime  # noqa: F401
         has_ort = True

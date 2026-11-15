@@ -8,6 +8,9 @@ Per night: EEG Fpz-Cz and EEG Pz-Oz at 100 Hz (raw EDF physical values in microv
 hypnogram_to_epochs): W=0, N1=1, N2=2, N3=3 (R&K stages 3 and 4 merged), REM=4; movement time and '?' are -1.
 Trimming follows the beta (evade/training/data.py sleep_features): keep the epochs from 60 epochs (30 min) before
 the first sleep epoch to 60 epochs after the last one, THEN drop the -1 epochs (movement, unknown).
+No normalization happens here: X stays in raw microvolts and the model normalizes each 30 s epoch on its own
+(sleep_models.epoch_robust_z), so the label-based trimming only chooses which epochs are trained and scored and never
+shapes any input statistic.
 
 Output arrays (rows sorted by night, then by time; every night is one contiguous block):
   X            float16 (N, 2, 3000)   microvolts, channels in `channels` order

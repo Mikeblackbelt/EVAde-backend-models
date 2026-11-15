@@ -1,11 +1,10 @@
 #!/bin/bash
-# GPU job: deep sleep staging (per-epoch CNN + bi-GRU) on Sleep-EDFx SC (one GPU, one node). Configs run one after
+# GPU job: deep sleep staging (per-epoch CNN + bi-GRU) on Sleep-EDFx SC (one GPU, one node). Steps run one after
 # another in this single job:
-#   1. kfold   10-fold by subject, Fpz-Cz + Pz-Oz (the estimate; also reports the 5 beta subjects separately)
+#   1. kfold   5-fold by subject, Fpz-Cz + Pz-Oz (the estimate; also reports the 5 beta subjects separately)
 #   2. beta5   leave-one-subject-out on SC400-SC404 only (the beta's protocol, for the 0.669 / 0.683 comparison)
 #   3. final   all subjects (10% held out for checkpoint selection): the exported model
-#   4. export  ONNX + manifest from final, metrics from kfold and beta5
-#   5. kfold_fpzcz  secondary config: Fpz-Cz only (single-channel headbands), after the export
+#   4. export  ONNX + manifest from final, metrics from kfold and beta5, into export/sleep_deep (API folder name)
 # Resubmitting the same file resumes (finished folds are skipped; SIGUSR1 near the time limit exits 99).
 #   smoke: sbatch --export=ALL,SMOKE=1 --time=00:20:00 --signal=B:USR1@60 sleep_deep.sbatch
 #   full:  sbatch sleep_deep.sbatch
@@ -18,7 +17,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=VOLTA|AMPERE
 #SBATCH --mem=32G
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH --output=/scratch/%u/evade/slurm/%x-%j.out
 #SBATCH --error=/scratch/%u/evade/slurm/%x-%j.err
@@ -34,7 +33,8 @@ export EVADE_CODE_COMMIT=$(cat "$PROJECT/code/COMMIT" 2>/dev/null || echo unknow
 TAG=$(echo "$EVADE_CODE_COMMIT" | cut -c1-10)
 RUN=$PROJECT/runs/sleep-deep-$TAG
 DATA=$PROJECT/data/sleep-sc/sleep_sc.npz
-SM=(); EPOCHS=30; BETA_EPOCHS=100
+# the default 20-night set gives only about 20-25 optimizer steps per epoch, hence many short epochs
+SM=(); EPOCHS=${EPOCHS:-100}; PATIENCE=${PATIENCE:-15}; BETA_EPOCHS=${BETA_EPOCHS:-100}; FOLDS=${FOLDS:-5}
 if [ "${SMOKE:-0}" = "1" ]; then
   RUN=$RUN-smoke; rm -rf "$RUN"; SM=(--smoke)
   [ -s "$DATA" ] || DATA=$PROJECT/data/sleep-sc/sleep_sc_smoke.npz
@@ -43,36 +43,42 @@ mkdir -p "$RUN"; cd "$RUN"
 
 {
   echo "job ${SLURM_JOB_ID:-?} on $(hostname) at $(date '+%F %T'), partition ${SLURM_JOB_PARTITION:-?}, smoke ${SMOKE:-0}"
-  echo "code $EVADE_CODE_COMMIT data $DATA"
+  echo "code $EVADE_CODE_COMMIT data $DATA epochs $EPOCHS patience $PATIENCE folds $FOLDS"
   nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader
 } >> job_info.txt 2>&1
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
 case "$GPU" in *K20*|*K40*|*K80*|"") echo "unsupported or missing GPU '$GPU'" >> job_info.txt; exit 3 ;; esac
 [ -s "$DATA" ] || { echo "missing packed data $DATA; run sleep_prep.sbatch" >> job_info.txt; exit 4; }
 
-# forward SIGUSR1 from the batch shell to the running python step, which exits 99 (last.pt = last finished epoch)
-child=0
-trap '[ $child -ne 0 ] && kill -USR1 $child' USR1
+# SIGUSR1 from slurm: remember it (sticky) and forward it to the running python step, which exits 99
+# (last.pt = last finished epoch). A step that has not started yet is not launched; rc 138 (killed by USR1 before
+# python set its handler) also counts as 99, so the README rule "resubmit on 99" always holds.
+child=0; stop=0
+trap 'stop=1; [ $child -ne 0 ] && kill -USR1 $child' USR1
 step() {   # step <log> <args...>
   local log=$1; shift
+  if [ $stop -eq 1 ]; then echo "step skipped after SIGUSR1: $*" >> job_info.txt; return 99; fi
   "$PY" "$@" >> "$log" 2>&1 &
   child=$!
   wait $child; local rc=$?
   while [ $rc -gt 128 ] && kill -0 $child 2>/dev/null; do wait $child; rc=$?; done   # wait again after the trap
   child=0
+  [ $rc -eq 138 ] && rc=99
   echo "step rc=$rc: $*" >> job_info.txt
   return $rc
 }
 
 T=(-m evade.training.deep.sleep_train --data "$DATA" --resume ${SM[@]+"${SM[@]}"})
-step run.log "${T[@]}" --protocol kfold --folds 10 --epochs $EPOCHS --run "$RUN/kfold" || exit $?
+step run.log "${T[@]}" --protocol kfold --folds $FOLDS --epochs $EPOCHS --patience $PATIENCE --run "$RUN/kfold" \
+     || exit $?
 step run.log "${T[@]}" --protocol beta5 --val-frac 0 --epochs $BETA_EPOCHS --run "$RUN/beta5" || exit $?
-step run.log "${T[@]}" --protocol final --epochs $EPOCHS --run "$RUN/final" || exit $?
-if step run.log -m evade.training.deep.sleep_export --run "$RUN" --out "$RUN/export/sleep"; then
+step run.log "${T[@]}" --protocol final --epochs $EPOCHS --patience $PATIENCE --run "$RUN/final" || exit $?
+step run.log -m evade.training.deep.sleep_export --run "$RUN" --out "$RUN/export/sleep_deep"; rc=$?
+if [ $rc -eq 0 ]; then
   (cd "$RUN/export" && find . -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS)
+elif [ $rc -eq 99 ]; then
+  exit 99
 else
   echo "export failed (training results are kept)" >> job_info.txt
 fi
-step run.log "${T[@]}" --protocol kfold --folds 10 --epochs $EPOCHS --channels Fpz-Cz --run "$RUN/kfold_fpzcz" \
-     || exit $?
 echo "done $(date '+%F %T')" >> job_info.txt

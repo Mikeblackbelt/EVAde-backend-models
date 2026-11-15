@@ -5,7 +5,7 @@
   python -m evade.training.deep.sleep_train --data sleep_sc.npz --protocol final --run <dir> --resume
 
 Protocols (each a list of units run in sequence; a unit is one training run in <run>/<unit>/):
-  kfold  subject-wise k-fold (default 10) over all subjects; both nights of a subject stay in one fold. The fold map
+  kfold  subject-wise k-fold (default 5) over all subjects; both nights of a subject stay in one fold. The fold map
          is a seeded permutation of the sorted subjects (or --splits <csv subject,fold>), written to splits.csv with
          its sha256. Inside each training fold, --val-frac of the training subjects are held out; best.pt is the
          epoch with the highest inner-validation Cohen's kappa. The test fold is scored once, with best.pt.
@@ -15,15 +15,16 @@ Protocols (each a list of units run in sequence; a unit is one training run in <
   final  one model on all subjects minus --val-frac held out for checkpoint selection; this is what gets exported.
          Its expected performance is the kfold estimate, not its own validation score.
 
-Input per epoch: Fpz-Cz and Pz-Oz (or --channels Fpz-Cz), robust z-scored per night and channel (median and
-1.4826 x MAD over all of that night's packed epochs, clipped to +/-20), so the API can compute it from the night itself.
+Input per epoch: Fpz-Cz and Pz-Oz in raw microvolts. The model normalizes inside its graph (sleep_models.epoch_robust_z):
+a robust z-score per 30 s epoch and channel (median and 1.4826 x MAD over that epoch only, floor 0.1, clip +/-20). No
+statistic depends on the night, the trimming or the labels, so the API reproduces it exactly from any chunk it gets.
 Training samples random windows of --seq-len consecutive epochs inside one night; weighted cross-entropy (balanced
 class weights from the training subjects); AdamW + one-cycle; fp16 autocast on GPU. Evaluation encodes every epoch
 once and averages softmax over GRU windows of --seq-len with --eval-stride.
 Metrics: pooled Cohen's kappa, macro F1, accuracy and per-class F1 with subject bootstrap 95% CIs (resampling
 subjects' confusion matrices), plus the beta's statistic (mean of per-subject kappa with a subject bootstrap).
 SIGUSR1 (sbatch --signal=B:USR1@N) exits 99 at once, keeping last.pt from the end of the last finished epoch, so the
-same job file can be resubmitted and the one-cycle schedule resumes exactly.
+same job file can be resubmitted and the one-cycle schedule resumes at the right step (dropout RNG is not restored).
 """
 from __future__ import annotations
 
@@ -40,11 +41,10 @@ import numpy as np
 import torch
 from torch import nn
 
-from .sleep_models import build
+from .sleep_models import CLIP, SCALE_FLOOR, build
 from .sleep_pack import BETA_SUBJECTS, CLASSES
 
 STOP = {"flag": False}
-CLIP = 20.0
 K = len(CLASSES)
 # beta (EVA-3 HGB, EVA-4 logistic) on SC400-SC404, leave-one-subject-out, 10,589 epochs (evade/training/README.md)
 BETA_BASELINE = {
@@ -54,6 +54,13 @@ BETA_BASELINE = {
     "eva4_logreg": {"subject_mean_kappa": 0.683, "ci95": [0.616, 0.745], "pooled_kappa": 0.685, "macro_f1": 0.730,
                     "accuracy": 0.767},
 }
+
+
+# the rule the model applies inside its graph (sleep_models.epoch_robust_z); the API sends raw uV ("none")
+NORMALIZATION = {"type": "none", "in_model": {
+    "type": "per_epoch_channel_robust_z", "center": "median", "scale": "1.4826 x MAD", "scale_floor": SCALE_FLOOR,
+    "clip": CLIP, "over": "the 3,000 samples of each 30 s epoch and channel on their own (median of an even count = "
+                          "mean of the two middle values); nothing depends on the night, the trimming or the labels"}}
 
 
 def _on_usr1(signum, frame):
@@ -159,7 +166,7 @@ class Data:
         z = np.load(path, allow_pickle=False)
         all_ch = [str(c) for c in z["channels"]]
         self.channels = channels
-        X = z["X"][:, [all_ch.index(c) for c in channels], :]       # fancy index: a writable copy
+        X = z["X"][:, [all_ch.index(c) for c in channels], :]       # raw uV; the model normalizes each epoch
         self.samples = X.shape[2]
         self.y = z["y"].astype(np.int64)
         self.subject = z["subject"].astype(str)
@@ -173,12 +180,7 @@ class Data:
         if len(set(self.night_names)) != len(self.night_names):
             raise ValueError("nights are not contiguous blocks in the npz")
         self.night_subject = self.subject[self.n_start]
-        for s, n in zip(self.n_start, self.n_len):           # per-night, per-channel robust z (the serving rule)
-            blk = X[s:s + n].astype(np.float32)
-            med = np.median(blk, axis=(0, 2), keepdims=True)
-            mad = 1.4826 * np.median(np.abs(blk - med), axis=(0, 2), keepdims=True)
-            X[s:s + n] = np.clip((blk - med) / np.maximum(mad, 0.1), -CLIP, CLIP).astype(np.float16)
-        self.x = torch.from_numpy(X).to(device)
+        self.x = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float16)).to(device)
         self.subjects = sorted(set(self.night_subject))
 
     def nights_of(self, subjects) -> np.ndarray:
@@ -366,7 +368,8 @@ def train_unit(a, d: Data, unit: dict, outdir: Path, device) -> dict:
         np.savez_compressed(outdir / "preds.npz", idx=it, probs=pt.astype(np.float32))
         res["test"] = scores(confusion(d.y[it], pt.argmax(1)))
         print(f"{unit['name']}: test kappa {res['test']['kappa']:.4f} macro F1 {res['test']['macro_f1']:.4f}", flush=True)
-    done.write_text(json.dumps(_clean(res), indent=1))
+    done.with_suffix(".tmp").write_text(json.dumps(_clean(res), indent=1))
+    done.with_suffix(".tmp").replace(done)                       # atomic: resume trusts result.json
     last.unlink(missing_ok=True)
     return res
 
@@ -378,7 +381,7 @@ def main(argv=None) -> int:
     p.add_argument("--protocol", required=True, choices=["kfold", "beta5", "final"])
     p.add_argument("--arch", default="cnn_bigru")
     p.add_argument("--channels", default="Fpz-Cz,Pz-Oz")
-    p.add_argument("--folds", type=int, default=10)
+    p.add_argument("--folds", type=int, default=5)
     p.add_argument("--splits", type=Path, default=None, help="optional frozen csv: subject,fold")
     p.add_argument("--split-seed", type=int, default=0)
     p.add_argument("--val-frac", type=float, default=0.1)
@@ -411,10 +414,7 @@ def main(argv=None) -> int:
 
     config = {"arch": a.arch, "channels": d.channels, "classes": CLASSES, "fs_hz": 100, "epoch_samples": d.samples,
               "seq_len": a.seq_len, "eval_stride": a.eval_stride,
-              "normalization": {"type": "per_night_channel_robust_z", "center": "median", "scale": "1.4826 x MAD",
-                                "scale_floor": 0.1, "clip": CLIP,
-                                "over": "all packed epochs of that night (sleep period +/- 30 min wake, "
-                                        "movement/unknown dropped)"},
+              "normalization": NORMALIZATION,
               "hyper": {k: getattr(a, k) for k in ("epochs", "patience", "bs", "lr", "wd", "seed", "val_frac")}}
     summary = {"task": "sleep_staging", "protocol": info, "config": config, "smoke": a.smoke,
                "n": {"epochs": int(len(d.y)), "nights": int(len(d.n_start)), "subjects": len(d.subjects)},

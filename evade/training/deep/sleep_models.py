@@ -3,11 +3,35 @@ sequence of epochs. Input (batch, seq, channels, 3000) at 100 Hz; output logits 
 
 The encoder sees one 30 s epoch at a time, so evaluation can encode every epoch of a night once and run only the
 GRU over overlapping windows (encode + context); forward() is the same computation in one call (used for export).
+
+Normalization is part of the model: encode() first applies epoch_robust_z to each 30 s epoch and channel on its own
+(median and 1.4826 x MAD over that epoch's 3,000 samples, floor 0.1, clip +/-20). The statistics depend only on the
+epoch itself, so training, evaluation, the ONNX export and the API (which sends raw microvolts and is told
+normalization "none") all compute exactly the same thing, whatever chunk of the night is submitted.
 """
 from __future__ import annotations
 
 import torch
 from torch import nn
+
+SCALE_FLOOR = 0.1     # microvolts: a flat (disconnected) epoch is divided by this, then clipped
+CLIP = 20.0
+
+
+def _median_last(x: torch.Tensor) -> torch.Tensor:
+    """Median over the last axis, the numpy way (mean of the two middle values for an even length). Built from sort
+    so it exports to ONNX (TopK) at any opset the exporter supports."""
+    n = x.shape[-1]
+    s = torch.sort(x, dim=-1).values
+    return 0.5 * (s[..., (n - 1) // 2] + s[..., n // 2]).unsqueeze(-1)
+
+
+def epoch_robust_z(x: torch.Tensor) -> torch.Tensor:
+    """(N, C, T) raw signal -> per-epoch, per-channel robust z-score, in float32."""
+    x = x.float()
+    med = _median_last(x)
+    mad = _median_last((x - med).abs())
+    return torch.clamp((x - med) / torch.clamp(1.4826 * mad, min=SCALE_FLOOR), -CLIP, CLIP)
 
 
 def conv_bn(ni, nf, k, stride=1):
@@ -39,8 +63,8 @@ class SleepSeqNet(nn.Module):
         self.drop = nn.Dropout(drop)
         self.fc = nn.Linear(2 * hidden, n_out)
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:          # (N, C, T) -> (N, F)
-        return self.enc(x)
+    def encode(self, x: torch.Tensor) -> torch.Tensor:          # (N, C, T) raw uV -> (N, F)
+        return self.enc(epoch_robust_z(x))
 
     def context(self, f: torch.Tensor) -> torch.Tensor:         # (B, L, F) -> (B, L, K)
         h, _ = self.gru(f)
