@@ -2,7 +2,7 @@
 
 Every retained model architecture and trained model in this repository gets a unique identifier of the form **`EVA-[n]`**, where `n` is a positive integer assigned in order of creation. This file is the single source of truth.
 
-**Next free ID: EVA-1**
+**Next free ID: EVA-7**
 
 ## Rules
 
@@ -26,7 +26,12 @@ Every retained model architecture and trained model in this repository gets a un
 
 | ID | Type | Name | Parent | Module | Task | Created | Commit | Data version | Split version | Evaluation | Metric (95% CI) | Status | Card |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | | | | |
+| EVA-1 | arch | seizure-window-hgb | - | EEG | seizure-suspect flag per 4 s window | 2026-11-14 | 8404bb1 | - | - | - | - | draft | [training README](evade/training/README.md) |
+| EVA-2 | model | seizure-window-hgb beta | EVA-1 | EEG | seizure-suspect flag per 4 s window | 2026-11-14 | 8404bb1 | CHB-MIT chb01-05 (listing 344e9a12), Siena 6 subjects (e593ab2a) | leave-one-subject-out, 5 CHB-MIT subjects; Siena external | window AUROC, AP, sensitivity at 1% FPR | subject AUROC 0.986 (0.969-0.997); Siena AUROC 0.920 | draft | [training README](evade/training/README.md) |
+| EVA-3 | arch | sleep-stage-hgb | - | EEG | 5-class sleep staging per 30 s epoch | 2026-11-14 | c98e542 | - | - | - | - | draft | [training README](evade/training/README.md) |
+| EVA-4 | model | sleep-stage-hgb beta | EVA-3 | EEG | 5-class sleep staging per 30 s epoch | 2026-11-14 | c98e542 | Sleep-EDFx SC400-SC404 (b99fb35a) | leave-one-subject-out, 5 subjects | accuracy, macro F1, Cohen's kappa | subject kappa 0.669 (0.545-0.785); logistic baseline 0.683 | draft | [training README](evade/training/README.md) |
+| EVA-5 | arch | ptbxl-superclass-hgb | - | ECG | 5 diagnostic superclasses, 12-lead 10 s | 2026-11-14 | c98e542 | - | - | - | - | draft | [training README](evade/training/README.md) |
+| EVA-6 | model | ptbxl-superclass-hgb beta | EVA-5 | ECG | 5 diagnostic superclasses, 12-lead 10 s | 2026-11-14 | c98e542 | PTB-XL 1.0.3 (f52b3af6) | official strat_fold: train 1-8, test 10 | macro AUROC, patient bootstrap | 0.867 (0.858-0.878) | draft | [training README](evade/training/README.md) |
 
 ## Entry template
 

@@ -38,5 +38,13 @@ On the shared lab server, run through the guard (`guarded_job.sh`) with 4 thread
 | CHB-MIT chb01 | seizure labels | `chb01_03` has 21 ictal windows for a 40 s seizure, as expected |
 | Siena PN00 | seizure labels | 70 s seizure gives 35 ictal windows; **PN00-3 annotation is inconsistent** (seizure end time is an hour after the registration end) and is flagged `annotation_suspect` and excluded from onset |
 | PTB-XL (first 50 records) | 100 Hz records | runs; one 10 s window per record, official fold and diagnostic class kept |
+| Sleep-EDFx (sleep-cassette, subject SC400, 2 nights, `--limit 2`) | hypnogram labels | 5,480 epochs of 30 s; W 3,882, N1 117, N2 623, N3 517, REM 340, unknown 1. EEG channels Fpz-Cz and Pz-Oz read at their own 100 Hz rate |
+| NHANES 2017-March 2020 DXA | bone reference table | 4,593 participants aged 50-80 (DXA femur was measured in this age range); femoral neck BMD for 3,545 (mean 0.770 g/cm2), total femur 3,545 (mean 0.929), spine 2,121 (mean 1.010) |
 
-Known limits: the QRS detector is a baseline, not validated; the quality index is a heuristic and rates most clean research data as 1.0; Siena seizure-list parsing was checked on PN00 only; Sleep-EDFx and NHANES loaders have not been run on real data yet; no model has been trained.
+Bugs fixed during the Sleep-EDFx and NHANES runs:
+- **Sleep-EDFx:** the reader took the most common sampling rate in the file, which was 1 Hz (temperature, event marker), so the EEG band-pass failed. `read_edf(..., label_prefix="EEG")` now reads only the EEG channels at their own rate.
+- **NHANES:** the femur file has no `DXXOSBMD` (that is total spine, in the spine file). Total femur is `DXXOFBMD`, femoral neck `DXXNKBMD`. Checked against the 2017-2020 files.
+
+Download status (server, 2026-11-14): one full pass plus one gap-filling re-run finished. Present: MIT-BIH, BIDMC, PTB-XL (zip and extracted), CHB-MIT chb01-chb05 (197 EDF files; empty folders exist for the other subjects), Siena PN00, PN01, PN03, PN05, PN06, PN07 (17 EDF files, 6 subjects), EEG During Mental Arithmetic, Sleep-EDFx (10 sleep-cassette nights from 5 subjects), NHANES DXA femur, spine and demographics. The log has two 404s and several transient 502s (mostly BIDMC CSVs in the re-run); unreadable files are skipped by the loaders and training builders, which print `SKIPPED`. About 27 GB in total.
+
+Known limits: the QRS detector is a baseline, not validated; the quality index is a heuristic and rates most clean research data as 1.0; Siena seizure-list parsing was checked on PN00 only; NHANES gives a cross-sectional reference, not longitudinal loss. Beta models trained on these outputs are described in `evade/training/README.md`.
