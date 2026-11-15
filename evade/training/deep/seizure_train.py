@@ -51,6 +51,13 @@ def _on_usr1(signum, frame):
     STOP["flag"] = True
 
 
+def check_stop():
+    """Between folds or before external scoring: everything finished is on disk, so just exit 99."""
+    if STOP["flag"]:
+        print("SIGUSR1 between steps; finished folds are saved; exiting 99", flush=True)
+        sys.exit(99)
+
+
 class Shards:
     """Windows of several shards in one float16 array, plus per-window subject, record and label arrays."""
 
@@ -64,9 +71,10 @@ class Shards:
                 rest = np.flatnonzero(y == 0)
                 keep = np.union1d(np.flatnonzero(y != 0), rest[:: max(1, len(rest) // 300)])
             meta.append((f, keep)); total += len(keep)
-            T = z["X"].shape[2]
+            T = int(round(float(z["fs"]) * E.WIN_S))      # (reading z["X"] here would load the whole shard twice)
         self.X = np.empty((total, 18, T), np.float16)
         ys, sh, rec, st, self.subjects, self.cases, self.med, self.mad = [], [], [], [], [], [], [], []
+        pres = []
         self.records, sz = [], {"subject": [], "rec_key": [], "start_s": [], "end_s": []}
         pos, r0 = 0, rec_offset
         for i, (f, keep) in enumerate(meta):
@@ -80,6 +88,7 @@ class Shards:
             self.med.append(z["norm_median" if norm == "nonictal" else "norm_median_all"])
             self.mad.append(z["norm_mad" if norm == "nonictal" else "norm_mad_all"])
             self.records += [f"{f.stem}/{r}" for r in z["records"]]
+            pres.append(z["rec_present"] if "rec_present" in z.files else np.ones((len(z["records"]), 18), bool))
             for k, a, b in zip(z["sz_rec"], z["sz_start_s"], z["sz_end_s"]):
                 sz["subject"].append(subj); sz["rec_key"].append(int(k) + r0)
                 sz["start_s"].append(float(a)); sz["end_s"].append(float(b))
@@ -94,6 +103,8 @@ class Shards:
         self.mad = np.stack(self.mad).astype(np.float32)
         self.seizures = sz
         self.n_records = r0 - rec_offset
+        self.present = np.concatenate(pres)          # (records, 18), indexed by rec - rec_offset
+        self.rec_offset = rec_offset
 
     def batch(self, idx: np.ndarray, device) -> torch.Tensor:
         idx = np.sort(idx)
@@ -101,7 +112,9 @@ class Shards:
         s = self.shard[idx]
         med = torch.from_numpy(self.med[s]).to(device)[:, :, None]
         mad = torch.from_numpy(self.mad[s]).to(device)[:, :, None]
-        return ((x - med) / mad).clamp_(-NORM_CLIP, NORM_CLIP), idx
+        # channels missing from a record stay exactly 0 after normalization (as the API does)
+        keep = torch.from_numpy(self.present[self.rec[idx] - self.rec_offset]).to(device)[:, :, None]
+        return ((x - med) / mad).clamp_(-NORM_CLIP, NORM_CLIP) * keep, idx
 
 
 def shard_files(root: Path, dataset: str, cases: str) -> list[Path]:
@@ -270,6 +283,7 @@ def run_loso(a, device) -> dict:
             folds.append(json.loads((fd / "result.json").read_text()))
             scores[te] = np.load(fd / "preds.npz")["score"]
             continue
+        check_stop()
         train_s = [t for t in subjects if t != s]
         val_s = pick_val(train_s, d, a.inner_val, a.seed + k)
         print(f"fold {s}: train {len(train_s) - len(val_s)} subjects, val {val_s}", flush=True)
@@ -325,6 +339,7 @@ def run_final(a, device) -> dict:
         out["thresholds_from"] = {"file": a.thresholds_from.name, "protocol": thr_src["protocol"],
                                   "cases": thr_src["cases"]}
     del d
+    check_stop()
     if a.external:
         files = shard_files(a.data, a.external, "all")
         if a.smoke:

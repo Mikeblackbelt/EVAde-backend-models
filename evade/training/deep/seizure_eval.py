@@ -149,7 +149,8 @@ def evaluate(scores: np.ndarray, y: np.ndarray, subject: np.ndarray, rec_key: np
             per[s][f"sensitivity_at_{key}"] = se
             per[s][f"fp_windows_per_hour_at_{key}"] = fp_s[s]
         op["sensitivity_subject_mean"] = M.subject_bootstrap_ci([v for v in sens_s.values()], n_boot, seed)
-        op["fp_windows_per_hour_subject_mean"] = float(np.nanmean(list(fp_s.values()))) if fp_s else float("nan")
+        fin = [v for v in fp_s.values() if np.isfinite(v)]
+        op["fp_windows_per_hour_subject_mean"] = float(np.mean(fin)) if fin else float("nan")
         det = {s: [0, 0] for s in set(seizures["subject"])}
         for s, idx in ev:
             det[s][1] += 1

@@ -15,10 +15,12 @@ One shard per CHB-MIT case or Siena subject: <out>/<dataset>/<case>.npz with
                                   window metrics and training, kept for smoothing and event scoring)
   rec        int16   (N,)         index into `records`
   start_s    float32 (N,)         window start within its record
-  records    str     (R,)         record ids (EDF stem); rec_dur_s float32 (R,); rec_channels int8 (R,) present
+  records    str     (R,)         record ids (EDF stem); rec_dur_s float32 (R,); rec_channels int8 (R,) present;
+                                  rec_present bool (R, 18) which montage channels exist (missing ones are zero-filled;
+                                  records with fewer than --min-channels are excluded)
   sz_rec, sz_start_s, sz_end_s    seizure table (record index, start, end in s), used for event-level scoring
   norm_median, norm_mad  float32 (18,)   per-channel median and 1.4826 x MAD of this person's NON-ictal (label 0)
-                                         windows: the personal baseline used by the model
+                                         windows, over records where the channel exists: the personal baseline
   norm_median_all, norm_mad_all          the same over all windows, ictal included (the beta's rule, kept only to
                                          show the limitation; not used by default)
   channels, dataset, subject, fs
@@ -30,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -52,11 +55,30 @@ SIENA6 = ["PN00", "PN01", "PN03", "PN05", "PN06", "PN07"]      # the beta's six 
 BETA5 = ["chb01", "chb02", "chb03", "chb04", "chb05"]
 
 
+def siena_blocks(text: str) -> list[tuple[str, str]]:
+    """Split a Siena seizure list into (file name, block text), one block per 'File name:' line.
+
+    The list repeats 'File name:' for every seizure, so a file with several seizures has several blocks (the beta
+    parser read only the first one). 'Start time:' / 'End time:' lines without the word 'Seizure' are normalized
+    so evade.preprocessing.eeg.parse_siena_seizure_list reads them.
+    """
+    text = re.sub(r"(?im)^(\s*)(start|end)\s+time", r"\1Seizure \2 time", text)
+    out = []
+    parts = re.split(r"(?im)^\s*File\s+name\s*:\s*", text)
+    for part in parts[1:]:
+        name, _, rest = part.partition("\n")
+        out.append((name.strip(), rest))
+    return out
+
+
 def siena_segments(text: str, edf_name: str, rec_dur: float) -> tuple[list, list]:
-    """Seizures of one Siena file as (start_s, end_s) offsets, split into usable and inconsistent ones (beta logic)."""
-    block = text.split(edf_name)[1].split("File name")[0] if edf_name in text else ""
-    _, sz = parse_siena_seizure_list(block)
-    segs = [((s - reg) % 86400.0, (e - reg) % 86400.0) for reg, s, e in sz]   # modulo: midnight rollover
+    """Seizures of one Siena file as (start_s, end_s) offsets, split into usable and inconsistent ones."""
+    segs = []
+    for name, block in siena_blocks(text):
+        if name != edf_name:
+            continue
+        _, sz = parse_siena_seizure_list(block)
+        segs += [((s - reg) % 86400.0, (e - reg) % 86400.0) for reg, s, e in sz]   # modulo: midnight rollover
     bad = [(s0, e0) for s0, e0 in segs if e0 > rec_dur + 5.0 or e0 < s0]
     return [sg for sg in segs if sg not in bad], bad
 
@@ -97,19 +119,29 @@ def process_record(edf: Path, dataset: str, seizures_or_text, fs_out: float) -> 
         lab[(starts >= s0 - config.SZ_PRE_BUFFER_S) & (lab != 1)] = -1
     return {"X": wins, "y": lab.astype(np.int8), "start_s": starts.astype(np.float32), "record": edf.stem,
             "rec_dur_s": float(rec_dur), "channels_present": int(sum(1 for p in present if p)),
+            "present": np.asarray([bool(p) for p in present]),
             "seizures": [(float(a), float(b)) for a, b in good], "n_bad_annotations": len(bad), "fs_in": float(fs)}
 
 
-def robust_channel_stats(X: np.ndarray, sel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Per-channel median and 1.4826 x MAD over the samples of the selected windows (evenly subsampled)."""
-    idx = np.flatnonzero(sel)
-    if len(idx) == 0:
-        idx = np.arange(len(X))
-    if len(idx) > NORM_MAX_WINDOWS:
-        idx = idx[np.linspace(0, len(idx) - 1, NORM_MAX_WINDOWS).astype(int)]
-    med = np.empty(X.shape[1], np.float32)
-    mad = np.empty(X.shape[1], np.float32)
+def robust_channel_stats(X: np.ndarray, sel: np.ndarray, present: np.ndarray | None = None
+                         ) -> tuple[np.ndarray, np.ndarray]:
+    """Per-channel median and 1.4826 x MAD over the samples of the selected windows (evenly subsampled).
+
+    present: (N, 18) bool, whether the channel exists in the window's record. A channel's statistics use only
+    windows where it exists (zero-filled stretches would otherwise pull the MAD to the floor); a channel absent
+    everywhere gets median 0 and the MAD floor, so its zeros stay zero.
+    """
+    med = np.zeros(X.shape[1], np.float32)
+    mad = np.full(X.shape[1], MAD_FLOOR_UV, np.float32)
     for c in range(X.shape[1]):
+        ok = sel if present is None else sel & present[:, c]
+        idx = np.flatnonzero(ok)
+        if len(idx) == 0:
+            idx = np.flatnonzero(present[:, c]) if present is not None else np.arange(len(X))
+            if len(idx) == 0:
+                continue
+        if len(idx) > NORM_MAX_WINDOWS:
+            idx = idx[np.linspace(0, len(idx) - 1, NORM_MAX_WINDOWS).astype(int)]
         v = X[idx, c, :].astype(np.float32).ravel()
         m = float(np.median(v))
         med[c] = m
@@ -118,19 +150,31 @@ def robust_channel_stats(X: np.ndarray, sel: np.ndarray) -> tuple[np.ndarray, np
 
 
 def pack_subject(job: dict) -> dict:
-    """Build one shard. job: dataset, case, files [(edf, seizures_or_text)], out, fs, smoke. Skips a finished shard."""
+    """Build one shard. job: dataset, case, files [(edf, seizures_or_text)], out, fs, smoke, min_channels.
+
+    Skips a finished shard. Records with fewer than `min_channels` of the 18 montage channels are left out (logged
+    and counted): mostly zero-filled windows would be scored with real labels.
+    """
     out = Path(job["out"]) / job["dataset"] / f"{job['case']}.npz"
     if out.exists():
         z = np.load(out, allow_pickle=False)
         return {"case": job["case"], "dataset": job["dataset"], "skipped": True, "n": int(len(z["y"])),
-                "n_ictal": int((z["y"] == 1).sum()), "n_seizures": int(len(z["sz_rec"])), "files": int(len(z["records"]))}
+                "n_ictal": int((z["y"] == 1).sum()), "n_seizures": int(len(z["sz_rec"])),
+                "files": int(len(z["records"]))}
     t0 = time.time()
-    parts, recs, durs, chans, sz_rec, sz_s, sz_e, rec_idx, log = [], [], [], [], [], [], [], [], []
+    parts, recs, durs, chans, pres, sz_rec, sz_s, sz_e, rec_idx, log = [], [], [], [], [], [], [], [], [], []
+    excluded, n_bad = [], 0
     for edf, info in job["files"]:
         try:
             r = process_record(Path(edf), job["dataset"], info, job["fs"])
         except Exception as e:                 # noqa: BLE001  (partial download, unreadable header)
             log.append(f"SKIPPED {Path(edf).name}: {type(e).__name__}: {e}")
+            continue
+        if r["channels_present"] < job["min_channels"]:
+            excluded.append({"record": r["record"], "channels_present": r["channels_present"],
+                             "seizures": len(r["seizures"])})
+            log.append(f"EXCLUDED {Path(edf).name}: only {r['channels_present']}/18 montage channels "
+                       f"({len(r['seizures'])} seizures lost)")
             continue
         if job["smoke"]:                       # keep every ictal window and a slice of the rest
             keep = np.flatnonzero(r["y"] != 0)
@@ -139,34 +183,50 @@ def pack_subject(job: dict) -> dict:
                 r[k] = r[k][keep]
         i = len(recs)
         recs.append(r["record"]); durs.append(r["rec_dur_s"]); chans.append(r["channels_present"])
+        pres.append(r["present"])
         for a, b in r["seizures"]:
             sz_rec.append(i); sz_s.append(a); sz_e.append(b)
+        n_bad += r["n_bad_annotations"]
         rec_idx.append(np.full(len(r["y"]), i, np.int16))
         parts.append(r)
-        listed = job["dataset"] == "siena" and Path(edf).name in str(info)
+        listed = job["dataset"] == "siena" and any(n == Path(edf).name for n, _ in siena_blocks(str(info)))
         if listed and not r["seizures"]:
             log.append(f"WARNING {Path(edf).name}: listed in the seizure file but no usable seizure parsed")
         log.append(f"{Path(edf).name}: {len(r['y'])} windows, {int((r['y'] == 1).sum())} ictal, "
                    f"{len(r['seizures'])} seizures, {r['n_bad_annotations']} inconsistent, "
                    f"{r['channels_present']}/18 channels, fs {r['fs_in']:g} Hz")
+    if job["dataset"] == "siena" and job["files"] and not job["smoke"]:
+        n_listed = len(siena_blocks(str(job["files"][0][1])))
+        if n_listed != len(sz_rec) + n_bad:
+            log.append(f"WARNING {job['case']}: {n_listed} seizure blocks in the list, {len(sz_rec)} usable and "
+                       f"{n_bad} inconsistent parsed (files missing, excluded, or names that do not match)")
     if not parts:
-        return {"case": job["case"], "dataset": job["dataset"], "skipped": False, "n": 0, "log": log}
+        return {"case": job["case"], "dataset": job["dataset"], "skipped": False, "n": 0, "excluded": excluded,
+                "log": log}
     X = np.concatenate([p["X"] for p in parts]); [p.pop("X") for p in parts]
     y = np.concatenate([p["y"] for p in parts])
-    med, mad = robust_channel_stats(X, y == 0)
-    med_all, mad_all = robust_channel_stats(X, np.ones(len(y), bool))
+    rec = np.concatenate(rec_idx)
+    present = np.stack(pres)                   # (records, 18)
+    med, mad = robust_channel_stats(X, y == 0, present[rec])
+    med_all, mad_all = robust_channel_stats(X, np.ones(len(y), bool), present[rec])
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.stem + ".tmp.npz")
-    np.savez(tmp, X=X, y=y, rec=np.concatenate(rec_idx), start_s=np.concatenate([p["start_s"] for p in parts]),
+    np.savez(tmp, X=X, y=y, rec=rec, start_s=np.concatenate([p["start_s"] for p in parts]),
              records=np.asarray(recs), rec_dur_s=np.asarray(durs, np.float32), rec_channels=np.asarray(chans, np.int8),
-             sz_rec=np.asarray(sz_rec, np.int16), sz_start_s=np.asarray(sz_s, np.float32),
+             rec_present=present, sz_rec=np.asarray(sz_rec, np.int16), sz_start_s=np.asarray(sz_s, np.float32),
              sz_end_s=np.asarray(sz_e, np.float32), norm_median=med, norm_mad=mad, norm_median_all=med_all,
              norm_mad_all=mad_all, channels=np.asarray(CHANNELS), dataset=np.asarray(job["dataset"]),
              subject=np.asarray(SUBJECT_ALIAS.get(job["case"], job["case"])), fs=np.asarray(job["fs"], np.float32))
     os.replace(tmp, out)
     return {"case": job["case"], "dataset": job["dataset"], "skipped": False, "n": int(len(y)),
-            "n_ictal": int((y == 1).sum()), "n_seizures": len(sz_rec), "files": len(recs),
+            "n_ictal": int((y == 1).sum()), "n_seizures": len(sz_rec), "n_inconsistent_annotations": n_bad,
+            "files": len(recs), "excluded": excluded,
             "n_norm_windows": int(min((y == 0).sum(), NORM_MAX_WINDOWS)), "sec": round(time.time() - t0, 1), "log": log}
+
+
+def _smoke_pick(files: list, is_seizure, n_sz: int, n_free: int) -> list:
+    """Smoke runs: seizure files first (so every subject has ictal windows), then a few seizure-free ones."""
+    return [f for f in files if is_seizure(f)][:n_sz] + [f for f in files if not is_seizure(f)][:n_free]
 
 
 def build_jobs(a) -> list[dict]:
@@ -179,7 +239,9 @@ def build_jobs(a) -> list[dict]:
         for case, files in sorted(by_case.items()):
             if a.cases and case not in a.cases:
                 continue
-            jobs.append({"dataset": "chbmit", "case": case, "files": files[:3] if a.smoke else files})
+            if a.smoke:
+                files = _smoke_pick(files, lambda f: bool(f[1]), 2, 1)
+            jobs.append({"dataset": "chbmit", "case": case, "files": files})
     if a.siena:
         by_subj: dict[str, list] = {}
         for edf, text, subj in beta_data.siena_jobs(Path(a.siena), max_free):
@@ -187,9 +249,11 @@ def build_jobs(a) -> list[dict]:
         for subj, files in sorted(by_subj.items()):
             if a.cases and subj not in a.cases:
                 continue
-            jobs.append({"dataset": "siena", "case": subj, "files": files[:2] if a.smoke else files})
+            if a.smoke:
+                files = _smoke_pick(files, lambda f: any(n == Path(f[0]).name for n, _ in siena_blocks(f[1])), 2, 0)
+            jobs.append({"dataset": "siena", "case": subj, "files": files})
     for j in jobs:
-        j.update(out=str(a.out), fs=float(a.fs), smoke=bool(a.smoke))
+        j.update(out=str(a.out), fs=float(a.fs), smoke=bool(a.smoke), min_channels=int(a.min_channels))
     return jobs
 
 
@@ -208,6 +272,8 @@ def main(argv=None) -> int:
     p.add_argument("--fs", type=float, default=256.0, help="output rate (CHB-MIT is 256 Hz native, Siena 512 Hz)")
     p.add_argument("--max-free", type=int, default=3, help="seizure-free files per subject (beta rule: 3; -1 = all)")
     p.add_argument("--cases", default="", help="comma list to pack only these cases or subjects")
+    p.add_argument("--min-channels", type=int, default=12,
+                   help="records with fewer of the 18 montage channels present are excluded (logged, counted)")
     p.add_argument("--workers", type=int, default=4, help="parallel CHB-MIT cases")
     p.add_argument("--siena-workers", type=int, default=1, help="parallel Siena subjects (files up to 1.7 GB)")
     p.add_argument("--smoke", action="store_true", help="3 files per case, 2 per Siena subject, subsampled windows")
@@ -224,8 +290,11 @@ def main(argv=None) -> int:
                "smoke": a.smoke, "channels": CHANNELS, "shards": res, "sec": round(time.time() - t0, 1)}
     for ds in ("chbmit", "siena"):
         rs = [r for r in res if r["dataset"] == ds and r.get("n")]
+        ex = [e for r in res if r["dataset"] == ds for e in r.get("excluded", [])]
         summary[ds] = {"cases": len(rs), "windows": sum(r["n"] for r in rs), "ictal": sum(r["n_ictal"] for r in rs),
-                       "seizures": sum(r["n_seizures"] for r in rs)}
+                       "seizures": sum(r["n_seizures"] for r in rs),
+                       "inconsistent_annotations": sum(r.get("n_inconsistent_annotations", 0) for r in rs),
+                       "excluded_records": len(ex), "excluded_seizures": sum(e["seizures"] for e in ex)}
     b5 = [r for r in res if r["case"] in BETA5]
     summary["check_beta5"] = {"windows": sum(r.get("n", 0) for r in b5), "ictal": sum(r.get("n_ictal", 0) for r in b5),
                               "beta_reference": "97,624 windows / 992 ictal at 250 Hz (counts at 256 Hz may differ "

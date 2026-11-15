@@ -25,26 +25,28 @@ This is the deep version of the beta EEG seizure model (EVA-2) for the CUNY HPCC
 Packing reuses the beta preprocessing:
 - `read_edf`; Siena is read with `label_prefix="EEG"`, so the EKG and SpO2 channels are left out.
 - The fixed 18-channel bipolar montage:
-  - CHB-MIT uses `select_bipolar`. Missing channels are zero-filled, and the number of channels present is stored for each record.
+  - CHB-MIT uses `select_bipolar`. Missing channels are zero-filled, and each record stores which channels are present (`rec_present`).
+  - Records with fewer than 12 of the 18 channels (`--min-channels`) are left out. They are logged as `EXCLUDED` and counted, with any seizures they hold, in `pack_summary.json`.
   - Siena uses `bipolar_from_monopolar`.
 - `preprocess_eeg`: a 0.5-45 Hz zero-phase Butterworth band-pass and a Q 30 notch, then resampling. The notch is 60 Hz for CHB-MIT and 50 Hz for Siena. The output rate is set explicitly to **256 Hz**: CHB-MIT is native, and Siena is resampled from 512 Hz. The code runs one channel at a time to bound memory.
 - The beta labels:
   - A window is ictal (1) when it overlaps a seizure by at least 2 s.
   - Windows from 60 s before a seizure to 120 s after it are -1.
   - Siena annotations that end after the recording does are never labelled ictal (the PN00-3 case).
+  - **Siena seizure lists differ from the beta.** A list repeats `File name:` for every seizure, so a file can have several blocks. The beta parser read only the first block per file. Any later seizure in the same file was therefore labelled non-ictal. 47 seizures in 41 files means some files hold several. Names like PN10-4.5.6 suggest which ones, but this has not been checked against the real lists. This pack reads every block, and also accepts `Start time:` and `End time:` lines without the word "Seizure". Siena labels, and therefore Siena metrics, can differ from the beta's on the same subjects.
 - The beta file rule from `evade/training/data.py` (`chb_jobs`, `siena_jobs`): every file with a seizure, plus 3 seizure-free files per subject. `--max-free -1` keeps every file (see the open questions).
 
 Windows are 4 s (1,024 samples) with a 2 s step. They are clipped to ±2,000 µV and stored as float16 in `data/seizure256/{chbmit,siena}/<case>.npz` with these arrays:
 - `X`, `y`, `rec`, `start_s`;
-- `records`, `rec_dur_s`, `rec_channels`;
+- `records`, `rec_dur_s`, `rec_channels`, `rec_present`;
 - the seizure table `sz_rec`, `sz_start_s` and `sz_end_s`;
 - `norm_median` and `norm_mad`.
 
 Label -1 windows are kept, because smoothing and event scoring need them. Window metrics and training leave them out.
 
 **Per-person normalization.** Each person's raw signal is scaled per channel with that person's median and 1.4826 x MAD.
-- The statistics come from the person's **non-ictal (label 0) windows**: up to 4,000 windows, evenly spaced.
-- The MAD has a floor of 0.5 µV, so zero-filled channels stay at 0. The scaled signal is clipped to ±20.
+- The statistics come from the person's **non-ictal (label 0) windows**: up to 4,000 windows, evenly spaced. Each channel uses only the records where that channel exists.
+- The MAD has a floor of 0.5 µV, and the scaled signal is clipped to ±20. A channel missing from a record is set to exactly 0 after scaling, in training and in the manifest rule for the API.
 - The API does the same with the user's seizure-free baseline recording.
 
 The beta used **all** of a person's windows, ictal ones included. That leaks a little label information into the features and cannot be reproduced at serving time. The shards also store the all-windows statistics (`norm_median_all`, `norm_mad_all`), so `--norm all` can reproduce the beta rule as an ablation. It is not used by default.

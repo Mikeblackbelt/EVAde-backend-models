@@ -47,9 +47,16 @@ def make_chb(root, rng, cases=("chb01", "chb02", "chb03"), dur=300, fs=256):
         d = root / c
         d.mkdir(parents=True)
         lines = []
-        for k, sz in ((1, [(120.0, 170.0)]), (2, [])):
+        files = [(1, [(120.0, 170.0)]), (2, [])]
+        if c == "chb03":
+            files.append((3, []))          # chb03_02 lacks FZ-CZ; chb03_03 has 5 channels only (excluded)
+        for k, sz in files:
             name = f"{c}_{k:02d}.edf"
             labels = list(config.BIPOLAR_NAMES) + ["ECG"]
+            if c == "chb03" and k == 2:
+                labels.remove("FZ-CZ")
+            if c == "chb03" and k == 3:
+                labels = labels[:5]
             sigs = [_signal(dur * fs, fs, rng, sz) for _ in labels]
             _write_edf(d / name, labels, sigs, fs)
             lines += [f"File Name: {name}", "File Start Time: 10:00:00", "File End Time: 10:05:00",
@@ -65,12 +72,15 @@ def make_siena(root, rng, subj="PN00", dur=240, fs=512):
     d.mkdir(parents=True)
     elec = sorted({e for pair in config.BIPOLAR_PAIRS for e in pair})
     labels = ["EEG " + e.capitalize() for e in elec] + ["EKG EKG"]
-    sz = [(100.0, 150.0)]
+    sz = [(40.0, 70.0), (150.0, 190.0)]
     sigs = [_signal(dur * fs, fs, rng, sz, amp=150.0 * (1 + i % 3)) for i, _ in enumerate(labels)]
     _write_edf(d / f"{subj}-1.edf", labels, sigs, fs)
+    # two seizures in one file: the list repeats "File name:" per seizure (the second block uses "Start time:")
     (d / f"Seizures-list-{subj}.txt").write_text(
-        "Seizure n 1\nFile name: PN00-1.edf\nRegistration start time: 10.00.00\nRegistration end time: 10.04.00\n"
-        "Seizure start time: 10.01.40\nSeizure end time: 10.02.30\n")
+        "Seizures list\n\nSeizure n 1\nFile name: PN00-1.edf\nRegistration start time: 10.00.00\n"
+        "Registration end time: 10.04.00\nSeizure start time: 10.00.40\nSeizure end time: 10.01.10\n\n"
+        "Seizure n 2\nFile name: PN00-1.edf\nRegistration start time: 10.00.00\nRegistration end time: 10.04.00\n"
+        "Start time: 10.02.30\nEnd time: 10.03.10\n")
 
 
 def _fake_read_edf(path, label_prefix=None):
@@ -104,14 +114,21 @@ def test_pack_shards(packed):
     assert list(z["records"]) == ["chb01_01", "chb01_02"] and len(z["sz_rec"]) == 1
     # per-person stats come from non-ictal windows only: ictal 300 uV rhythm inflates the all-window MAD
     assert np.all(z["norm_mad"] < z["norm_mad_all"])
-    med, mad = seizure_pack.robust_channel_stats(z["X"], z["y"] == 0)
+    med, mad = seizure_pack.robust_channel_stats(z["X"], z["y"] == 0, z["rec_present"][z["rec"]])
     np.testing.assert_allclose(mad, z["norm_mad"], rtol=1e-5)
+    # missing channel: stats only from records that have it; the 5-channel record is excluded
+    c3 = np.load(out / "chbmit" / "chb03.npz", allow_pickle=False)
+    k = list(config.BIPOLAR_NAMES).index("FZ-CZ")
+    assert list(c3["records"]) == ["chb03_01", "chb03_02"] and not c3["rec_present"][1, k]
+    assert c3["norm_mad"][k] > 10.0 * seizure_pack.MAD_FLOOR_UV
     s = np.load(out / "siena" / "PN00.npz", allow_pickle=False)
     assert s["X"].shape[1:] == (18, 1024) and float(s["fs"]) == 256.0
+    np.testing.assert_allclose(np.c_[s["sz_start_s"], s["sz_end_s"]], [[40, 70], [150, 190]])
     ict = s["start_s"][s["y"] == 1]
-    assert len(ict) > 0 and ict.min() >= 96.0 and ict.max() <= 150.0      # seizure at 100-150 s
+    assert ict.min() >= 36.0 and ict.max() <= 190.0 and ((ict > 70) & (ict < 146)).sum() == 0
     summ = json.loads((out / "pack_summary.json").read_text())
-    assert summ["chbmit"]["cases"] == 3 and summ["siena"]["seizures"] == 1
+    assert summ["chbmit"]["cases"] == 3 and summ["siena"]["seizures"] == 2
+    assert summ["chbmit"]["excluded_records"] == 1
 
 
 def test_end_to_end_train_resume_export(packed):
@@ -119,11 +136,21 @@ def test_end_to_end_train_resume_export(packed):
     common = ["--data", str(out), "--arch", "seizure_tiny", "--epochs", "2", "--epoch-windows", "96", "--bs", "32",
               "--n-boot", "20", "--inner-val", "1"]
     loso = tmp / "loso"
-    seizure_train.STOP["flag"] = True                    # fake SIGUSR1 during the first fold
-    with pytest.raises(SystemExit) as e:
-        seizure_train.main(common + ["--protocol", "loso", "--run", str(loso), "--resume"])
-    assert e.value.code == 99 and (loso / "fold_chb01" / "last.pt").exists()
-    seizure_train.STOP["flag"] = False
+    real_augment = seizure_train.augment
+
+    def augment_then_signal(*args):                      # fake SIGUSR1 during the first training step
+        seizure_train.STOP["flag"] = True
+        return real_augment(*args)
+
+    try:
+        with pytest.MonkeyPatch.context() as mp, pytest.raises(SystemExit) as e:
+            mp.setattr(seizure_train, "augment", augment_then_signal)
+            seizure_train.main(common + ["--protocol", "loso", "--run", str(loso), "--resume"])
+    finally:
+        seizure_train.STOP["flag"] = False
+    assert e.value.code == 99
+    ck = torch.load(loso / "fold_chb01" / "last.pt", weights_only=True)
+    assert (ck["epoch"], ck["step"]) == (0, 1)           # mid-epoch checkpoint: resumes at step 2 of epoch 1
     assert seizure_train.main(common + ["--protocol", "loso", "--run", str(loso), "--resume"]) == 0
     m = json.loads((loso / "metrics.json").read_text())
     oof = m["chbmit_oof"]
@@ -141,7 +168,7 @@ def test_end_to_end_train_resume_export(packed):
     fm = json.loads((final / "metrics.json").read_text())
     ext = fm["external_siena"]["all_subjects"]["at_chbmit_thresholds"]
     assert ext["operating_points"][0]["threshold"] == oof["operating_points"][0]["threshold"]
-    assert ext["n_seizures"] == 1 and "siena6_beta_subjects" in fm["external_siena"]
+    assert ext["n_seizures"] == 2 and "siena6_beta_subjects" in fm["external_siena"]
 
     exp = tmp / "export" / "seizure"
     assert seizure_export.main(["--run", str(final), "--out", str(exp)]) == 0

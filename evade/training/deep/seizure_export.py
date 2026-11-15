@@ -79,7 +79,7 @@ def main(argv=None) -> int:
             "kind": "tensor", "modality": "eeg", "dtype": "float32", "tensor_shape": ["batch", len(channels), T],
             "fs_hz": win["fs_hz"], "window_s": win["window_s"], "step_s": win["step_s"],
             "channels": channels, "channels_file": "feature_names.json",
-            "montage": "18-channel bipolar double banana (anode minus cathode); missing channels zero-filled",
+            "montage": "18-channel bipolar double banana (anode minus cathode); a missing channel is set to 0 after normalization",
             "unit": "microvolt",
             "filter": {"bandpass_hz": list(config.EEG_BAND), "type": "Butterworth order 4, zero-phase (sosfiltfilt)",
                        "notch_hz": "mains (60 in the US data, 50 in Europe), Q 30, zero-phase",
