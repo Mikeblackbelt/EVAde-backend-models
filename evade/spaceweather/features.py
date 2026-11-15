@@ -108,6 +108,10 @@ def latest_features(obs: Observations, now: pd.Timestamp | None = None) -> tuple
     if df.empty or "proton_10mev_pfu" not in df.columns:
         return None, {"reason": "no proton data"}
     end = now if now is not None else df.index.max()
+    # bound the work by time, not only by record count: two records years apart must not build a huge hourly grid
+    df = df[(df.index >= end.floor("1h") - pd.Timedelta(hours=LOOKBACK_H + 2)) & (df.index <= end)]
+    if df.empty or df["proton_10mev_pfu"].notna().sum() == 0:
+        return None, {"reason": "no proton data in the last 48 h"}
     h = to_hourly(df, end=end)
     h = h.iloc[-(LOOKBACK_H + 1):]
     f = feature_frame(h)

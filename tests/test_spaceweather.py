@@ -249,6 +249,15 @@ def test_feature_parity_long_history_vs_trailing_window():
             assert (b is None and not np.isfinite(a)) or a == pytest.approx(b, rel=1e-9, abs=1e-12), f
 
 
+def test_latest_features_bounded_by_time_span():
+    import time as _t
+    far = [Record.make(NOW - timedelta(days=5 * 365), proton_10mev_pfu=0.5), Record.make(NOW, proton_10mev_pfu=0.6)]
+    t0 = _t.perf_counter()
+    row, cov = latest_features(Observations("x", far))
+    assert _t.perf_counter() - t0 < 1.0
+    assert cov["hours"] <= LOOKBACK_H + 1 and row["lp10"] == pytest.approx(np.log10(0.6))
+
+
 def test_labels_onset_task():
     obs = synthetic_hourly_obs()
     h = to_hourly(records_frame(obs))
@@ -412,6 +421,21 @@ def test_api_provider_unavailable_and_validation():
                json={"user_id": uid, "observations": [{"t_utc": NOW.isoformat(), "kp": 3}]})
     assert r.status_code == 422                               # no proton data
     assert C.post("/v1/predict/space-weather", json={"user_id": uid, "provider": "noaa_swpc"}).status_code == 401
+
+
+def test_api_rejects_long_time_spans():
+    uid = new_user()
+    old = [{"t_utc": (NOW - timedelta(days=5 * 365)).isoformat(), "proton_10mev_pfu": 0.5},
+           {"t_utc": NOW.isoformat(), "proton_10mev_pfu": 0.5}]
+    r = C.post("/v1/predict/space-weather", headers=H, json={"user_id": uid, "observations": old})
+    assert r.status_code == 422                               # older than 7 days
+    wide = [{"t_utc": (NOW - timedelta(days=6)).isoformat(), "proton_10mev_pfu": 0.5},
+            {"t_utc": NOW.isoformat(), "proton_10mev_pfu": 0.5}]
+    r = C.post("/v1/predict/space-weather", headers=H, json={"user_id": uid, "observations": wide})
+    assert r.status_code == 422 and "span" in r.json()["error"]["message"]
+    fut = [{"t_utc": (NOW + timedelta(days=1)).isoformat(), "proton_10mev_pfu": 0.5}]
+    r = C.post("/v1/predict/space-weather", headers=H, json={"user_id": uid, "observations": fut})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "future_timestamp"
 
 
 def test_api_with_loaded_model(tmp_path, monkeypatch):

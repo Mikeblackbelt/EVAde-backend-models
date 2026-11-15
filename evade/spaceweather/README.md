@@ -45,7 +45,7 @@ class MyApiProvider(SpaceWeatherProvider):
 register("my_api", MyApiProvider())                    # wrapped in the cache (5 min success, 1 min failure)
 ```
 
-Then add `"my_api"` to the `provider` allow-list in `evade/api/schemas.py` (`SpaceWeatherRequest`). `Record.make` drops non-finite and out-of-range values. Clients choose providers by name only and never pass a URL or a path. Raw observations can also be POSTed directly (`observations`, up to 5000 records), which needs no adapter at all.
+Then add `"my_api"` to the `provider` allow-list in `evade/api/schemas.py` (`SpaceWeatherRequest`). `Record.make` drops non-finite and out-of-range values. Clients choose providers by name only and never pass a URL or a path. Raw observations can also be POSTed directly (`observations`: up to 5000 records, none older than 7 days or in the future, spanning at most 96 h; otherwise 422), which needs no adapter at all. Inference also drops records older than 50 h before the latest one before building the hourly grid, so a provider that returns a long history cannot make the API build a huge frame.
 
 ## NOAA SWPC reference provider
 

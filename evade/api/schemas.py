@@ -138,6 +138,10 @@ class RadiationRequest(BaseModel):
         return _not_future(v)
 
 
+SPACEWX_MAX_AGE_DAYS = 7      # posted observations must be recent (the model looks back 48 h)
+SPACEWX_MAX_SPAN_H = 96       # and span at most 4 days, so time span cannot blow up the hourly grid
+
+
 class SpaceWeatherObs(BaseModel):
     """One normalized observation (evade/spaceweather/schema.py FIELDS); every value is optional."""
     t_utc: datetime
@@ -155,7 +159,10 @@ class SpaceWeatherObs(BaseModel):
     @field_validator("t_utc")
     @classmethod
     def check_time(cls, v):
-        return _not_future(v)
+        v = _not_future(v)
+        if v < datetime.now(timezone.utc) - timedelta(days=SPACEWX_MAX_AGE_DAYS):
+            raise ValueError(f"t_utc older than {SPACEWX_MAX_AGE_DAYS} days")
+        return v
 
 
 class SpaceWeatherRequest(BaseModel):
@@ -172,8 +179,12 @@ class SpaceWeatherRequest(BaseModel):
     def _one_source(self):
         if (self.provider is None) == (self.observations is None):
             raise ValueError("give exactly one of provider or observations")
-        if self.observations is not None and len(self.observations) == 0:
-            raise ValueError("observations must not be empty")
+        if self.observations is not None:
+            if len(self.observations) == 0:
+                raise ValueError("observations must not be empty")
+            ts = [o.t_utc for o in self.observations]
+            if max(ts) - min(ts) > timedelta(hours=SPACEWX_MAX_SPAN_H):
+                raise ValueError(f"observations span more than {SPACEWX_MAX_SPAN_H} h")
         return self
 
 
