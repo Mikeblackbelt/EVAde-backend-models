@@ -1,6 +1,6 @@
 # EVAde model service (beta)
 
-FastAPI service for the hackathon-minimum subset of [api-schema.md](../../lit%20review/planning/api-schema.md). It returns flags and estimates for human review, never diagnoses. By default, state is kept in memory and is lost on restart. With `EVADE_STORAGE=cloudflare` it is written through to Cloudflare D1, with blobs in R2 (see [Storage](#storage)). Models are loaded from manifest folders; [evade/models/README.md](../models/README.md) describes the contract.
+FastAPI service for the hackathon-minimum subset of [api-schema.md](../../lit%20review/planning/api-schema.md). It returns flags and estimates for human review, never diagnoses. By default, state is kept in memory only (one copy, no history rows) and is lost on restart. With `EVADE_STORAGE=cloudflare` it is written through to Cloudflare D1, with blobs in R2 (see [Storage](#storage)). Models are loaded from manifest folders; [evade/models/README.md](../models/README.md) describes the contract.
 
 ## Run
 
@@ -28,9 +28,9 @@ Every request except `GET /v1/health` needs `Authorization: Bearer <token>`. Int
 
 | Endpoint | What it does |
 |---|---|
-| `GET /v1/health` | liveness and which models loaded |
-| `GET /v1/models` | served models from their manifests (`EVA-[n]`, status, format, input and output spec, headline metrics, commit, data), plus `unavailable` folders with the reason (draft without the flag, hash mismatch, missing runtime) |
-| `POST /v1/users`, `DELETE /v1/users/{id}` | create a pseudonymous user (UUID); delete all of their data, including D1 rows and R2 objects with Cloudflare storage. Returns 503 `deletion_incomplete` if storage fails, and the DELETE can be retried |
+| `GET /v1/health` | liveness and which models loaded; never touches storage, so it answers during a D1 outage |
+| `GET /v1/models` | served models from their manifests (`EVA-[n]`, status, format, input and output spec, headline metrics, commit, data, `integrity`: `sha256_verified` or `unverified` for a legacy folder without a pinned hash), plus `unavailable` folders with a generic `reason_code` and `reason` (`draft_not_allowed`, `sha256_mismatch`, `runtime_missing`, `manifest_invalid`, ...; details only in the server log) |
+| `POST /v1/users`, `DELETE /v1/users/{id}` | create a pseudonymous user (UUID); delete all of their data, including D1 rows and R2 objects with Cloudflare storage. Returns 503 `deletion_incomplete` if storage fails; the DELETE can be retried, also after a restart, until it returns 200. A completed deletion then gives 404 |
 | `POST /v1/baseline/{modality}` | add ECG or EEG windows, or readings, to the user's baseline; locks after the minimum count (demo: 30 windows) |
 | `POST /v1/baseline/{modality}/confirm`, `/reset` | confirm a provisional baseline; archive and start over |
 | `GET /v1/users/{id}/baseline` | baselines with center, spread, count, status |
@@ -41,7 +41,7 @@ Every request except `GET /v1/health` needs `Authorization: Bearer <token>`. Int
 | `POST /v1/predict/risk` | risk score R (v2), band, flag, overrides, and maximum days to return (MDTR) with driver; MDTR is withheld without `logistics_floor_days` |
 | `POST /v1/input/self-report` | 1-5 ratings compared with the user's own baseline |
 | `POST /v1/input/instrument` | PHQ-9 or GAD-7 score and band; PHQ-9 item 9 above 0 raises override O1 (clinician contact) |
-| `POST /v1/devices/bind`, `GET`/`DELETE /v1/devices/{id}?user_id=` | bind a Bluetooth device to one user (409 if bound to another), status, unbind |
+| `POST /v1/devices/bind`, `GET`/`DELETE /v1/devices/{id}?user_id=` | bind a Bluetooth device to one user (409 if bound to another), status, unbind (also removes a stored binding this process has not loaded, only for its owner) |
 | `POST /v1/ingest/batch` | readings or windows from a bound device with a per-device `seq`; duplicates ignored, gaps counted, results compared with the baseline |
 | `GET /v1/actions?user_id=` | action text for current flags (draft wording, to be reviewed) |
 
@@ -75,14 +75,18 @@ Requests are capped at 1 MB, which is about 30 s of 18-channel EEG at 250 Hz as 
 |---|---|
 | users (UUID, created time, cohort, age band, sex as given), baselines and their archive (derived metric values, center, spread), per-user state (radiation domain, overrides, latest comparisons, locked EEG feature median and MAD), reading values and window metadata, non-green flags, risk results, device bindings, tombstones (SHA-256 of deleted IDs) | names, emails, PHQ-9 or GAD-7 answers, and raw waveforms (unless `EVADE_STORE_RAW_WINDOWS=1`, which keeps them in R2 under `raw/<user_id>/`) |
 
-`DELETE /v1/users/{id}` blocks writes for the user, writes the tombstone, deletes the rows in every table, then deletes every R2 object under `raw/<user_id>/` and `exports/<user_id>/`.
+`DELETE /v1/users/{id}` blocks writes for the user, writes the tombstone and a pending-deletion marker, deletes the rows in every table, deletes every R2 object under `raw/<user_id>/` and `exports/<user_id>/`, and clears the marker last. If R2 fails, the marker stays, so a retried DELETE finishes the job even after a restart. The tombstone is enforced inside every D1 write (`INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM tombstones ...)`), so a write already in flight when the DELETE commits cannot recreate rows. A user whose tombstone is in D1 is never loaded again.
+
+**Write rules.** State that later requests depend on is written to storage before the response, and a 503 there never leaves a change that a client retry would apply twice: users and device bindings are written first (a failed bind is rolled back in memory), unbind deletes the stored row before the in-memory one, and a baseline reset archives in D1 before memory. Overrides and the radiation state are idempotent on retry. Audit rows (readings and window metadata, flags, risk results) and the latest comparisons are best effort: a failed write returns 200 with the warning `stored in this service only: ...` instead of a 503. The latest comparisons and the locked EEG feature baseline are rewritten by the next request's flush, and so are changed baselines. A request's best-effort writes go to D1 as one batch. A stale baseline flush cannot bring back a reset baseline, because a reset archives the baseline IDs and archived IDs are never written back. A device's `last_seq` in D1 only moves forward.
+
+**Outages.** D1 calls use a 3 s connect and 5 s read timeout, at most 2 retries that honour `Retry-After`, and a circuit breaker: after 5 consecutive failed attempts every call fails at once for 30 s, so requests return 503 `storage_unavailable` immediately instead of tying up the threadpool. Each request has a storage time budget of `EVADE_STORAGE_DEADLINE_S` seconds (default 8) across all its calls. `GET /v1/health` never waits on D1. Unknown `user_id`s are remembered for 60 s (bounded), so repeated lookups do not hit D1, and loading a user is one D1 request with the risk history capped at the last 100 points, plus the newest point at least 7 days old for the MDTR trend.
 
 Setup (once):
 
 1. Create a D1 database (dashboard, Storage & Databases > D1, or `npx wrangler d1 create evade`) and note its database ID.
 2. Create an API token (My Profile or Manage Account > API Tokens > Create Custom Token) with the permission **Account > D1 > Edit**, limited to this account.
-3. Create an R2 bucket. Then go to R2 > Manage API tokens, create a token with **Object Read & Write** scoped to that bucket, and copy the Access Key ID and Secret Access Key (the secret is shown once).
-4. Apply the schema: `python -m evade.storage.migrate`, or `npx wrangler d1 execute <db-name> --remote --file evade/storage/schema.sql`.
+3. Create an R2 data bucket for raw windows and exports. Then go to R2 > Manage API tokens, create a token with **Object Read & Write** scoped to that bucket only, and copy the Access Key ID and Secret Access Key (the secret is shown once). Model artifacts go in a separate models bucket, and the API's token gets no access to it (see [evade/models/README.md](../models/README.md#syncing-with-cloudflare-r2)).
+4. Apply the schema: `python -m evade.storage.migrate`, or `npx wrangler d1 execute <db-name> --remote --file evade/storage/schema.sql`. It is idempotent; apply it again after pulling a change to it (migration 2 adds `pending_deletions`).
 5. `pip install boto3` (only needed for R2), set the variables below as secrets in the deployment (never in the repo), and set `EVADE_STORAGE=cloudflare`.
 
 | Variable | Value |
@@ -91,14 +95,15 @@ Setup (once):
 | `CF_ACCOUNT_ID` | account ID (dashboard sidebar or `wrangler whoami`) |
 | `CF_API_TOKEN` | API token with Account > D1 > Edit |
 | `CF_D1_DATABASE_ID` | D1 database UUID |
-| `CF_R2_BUCKET` | bucket name (optional: without the R2 variables, blob storage is off) |
-| `CF_R2_ACCESS_KEY_ID`, `CF_R2_SECRET_ACCESS_KEY` | from the R2 API token |
+| `CF_R2_BUCKET` | data bucket name (optional: without the R2 variables, blob storage is off) |
+| `CF_R2_ACCESS_KEY_ID`, `CF_R2_SECRET_ACCESS_KEY` | from the data bucket's R2 API token |
+| `EVADE_STORAGE_DEADLINE_S` | per-request storage time budget in seconds (default 8) |
 | `CF_R2_ENDPOINT` | only for jurisdiction buckets, for example `https://<account>.eu.r2.cloudflarestorage.com` |
 | `EVADE_STORE_RAW_WINDOWS` | `1` to keep raw windows in R2 (off by default) |
 
 **Run one API process (one worker, one replica) per database.** The in-memory working copy, the deletion gate and the device sequence checks are per process, so several workers writing to the same D1 database could overwrite each other's baselines or let a late write slip past a deletion in another worker. Apply `schema.sql` before the first start with `EVADE_STORAGE=cloudflare`.
 
-Model folders can live in the same bucket under `models/<task>/` and be synced with `scripts/fetch_models.py`. Credentials are never logged or included in error messages. A storage outage returns 503 `storage_unavailable`. Baseline updates that fail to write stay in memory and are retried on the next request.
+Model folders live in their own bucket under `models/<task>/` and are synced with `scripts/fetch_models.py` using a read-only key on servers. Credentials are never logged or included in error messages. A storage outage returns 503 `storage_unavailable` for writes that must be stored, and a warning for best-effort writes. Baseline and state updates that fail to write stay in memory and are retried on the next request.
 
 ## Not done yet
 

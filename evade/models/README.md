@@ -76,13 +76,24 @@ Example (abridged):
 | onnx | `onnxruntime` (optional, `pip install onnxruntime`), CPU provider | listed unavailable |
 | torchscript | `torch` (optional), `torch.jit.load(map_location="cpu")` | listed unavailable |
 
-**Beta folders from before this contract:** `seizure/` and `ecg/` with `model.joblib` and no `manifest.json` still load. The registry builds a manifest from MODEL_REGISTRY.md (EVA-2, EVA-6, draft) and marks them `legacy: true, sha256_verified: false`, because no reference hash exists. To give them a verified manifest, call `write_manifest` on the folder on the machine that built it (as `train.py` now does), or retrain.
+**Beta folders from before this contract:** `seizure/` and `ecg/` with `model.joblib` and no `manifest.json` still load. The registry builds a manifest from MODEL_REGISTRY.md (EVA-2, EVA-6, draft) and marks them `legacy: true`. Without a reference hash they are served as `integrity: "unverified"` in `GET /v1/models`, with a warning in the log. To verify one, pin the weights' SHA-256 with `EVADE_LEGACY_SHA256_SEIZURE` or `EVADE_LEGACY_SHA256_ECG` (64 hex characters, computed on the machine that built it). A mismatch then refuses to load. Better still, call `write_manifest` on the folder on the machine that built it (as `train.py` now does), or retrain.
+
+**Read once, then load.** Each file is read into memory once. Those bytes are hashed and compared with the manifest, and the same bytes are deserialized: joblib from a `BytesIO`, ONNX from bytes, TorchScript from a buffer. Nothing can swap the file between the check and the load. A loader is never called when a hash does not match. The loaded object must look like a model (`predict` or `predict_proba`, a dict of such estimators, an `onnxruntime.InferenceSession`, or a TorchScript module), otherwise the folder is unavailable with `unexpected_model_type`. That check runs after unpickling, so it is a sanity check, not a defence.
+
+**Unavailable folders** are listed in `GET /v1/models` with a generic `reason_code` and `reason`: `manifest_invalid`, `model_id_unassigned`, `draft_not_allowed`, `runtime_missing`, `file_missing`, `sha256_mismatch`, `unexpected_model_type`, `load_failed`. The detail (exception text, file names) goes only to the server log.
 
 **Safety:** joblib and pickle files execute code when loaded. Only put artifacts built by `evade.training` on machines we control into `EVADE_MODEL_DIR`, or artifacts fetched from our own R2 bucket. The sha256 check catches corruption, partial copies and swapped files. It does not protect against a compromised source, because the hash travels with the artifact. Prefer ONNX for models that leave our machines.
 
 ## Syncing with Cloudflare R2
 
-R2 layout: `models/<task>/manifest.json` and the files it names.
+R2 layout: `models/<task>/manifest.json` and the files it names, in a **separate models bucket**, so the API's data-bucket key cannot rewrite models.
+
+| Machine | Variables | R2 token permission |
+|---|---|---|
+| servers (pull) | `CF_R2_MODELS_BUCKET`, `CF_R2_MODELS_ACCESS_KEY_ID`, `CF_R2_MODELS_SECRET_ACCESS_KEY` | Object Read only, models bucket |
+| training machines (push) | `CF_R2_MODELS_BUCKET`, `CF_R2_MODELS_WRITE_ACCESS_KEY_ID`, `CF_R2_MODELS_WRITE_SECRET_ACCESS_KEY` | Object Read & Write, models bucket |
+
+The write keys never go on a server. `pull` only ever sees a list/get view of the bucket. Without `CF_R2_MODELS_BUCKET`, the script falls back to `models/` in the data bucket (`CF_R2_BUCKET` with its read-write key) and logs a warning.
 
 ```
 python scripts/fetch_models.py                    # pull every task into EVADE_MODEL_DIR (sha256 verified, atomic swap)
@@ -90,7 +101,7 @@ python scripts/fetch_models.py --task spaceweather
 python scripts/fetch_models.py --push $EVADE_MODEL_DIR/spaceweather   # upload (files first, manifest last)
 ```
 
-This needs `pip install boto3` and `CF_ACCOUNT_ID`, `CF_R2_BUCKET`, `CF_R2_ACCESS_KEY_ID` and `CF_R2_SECRET_ACCESS_KEY` (see [evade/api/README.md](../api/README.md)). A failed hash leaves the current folder untouched.
+This needs `pip install boto3`, `CF_ACCOUNT_ID` and the variables above. A failed hash leaves the current folder untouched, and so does a failed folder swap, because the old folder is renamed back. A folder is downloaded again only when the remote manifest differs from the local one (compared as parsed JSON, so hand-written manifests are not re-downloaded every time) or a local hash no longer matches.
 
 ## Why there is no generic `POST /v1/predict/{model_id}`
 
