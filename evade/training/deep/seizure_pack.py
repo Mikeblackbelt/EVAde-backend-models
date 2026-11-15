@@ -6,8 +6,9 @@
 Reuses the beta preprocessing: evade.preprocessing.datasets.read_edf (Siena with label_prefix="EEG"), the fixed
 18-channel bipolar montage (select_bipolar for CHB-MIT, bipolar_from_monopolar for Siena), preprocess_eeg
 (0.5-45 Hz zero-phase band-pass, mains notch 60 Hz CHB-MIT / 50 Hz Siena, resample), the beta window labels and
-buffers (label_windows_seizure) and the beta file selection and seizure parsing (evade.training.data.chb_jobs and
-siena_jobs: every file with a seizure plus `--max-free` seizure-free files per subject; -1 keeps every file).
+buffers (label_windows_seizure) and the beta file selection and seizure parsing (evade.training.data.chb_jobs, and
+siena_files = siena_jobs with a name match that tolerates the real Siena lists' typos: every file with a seizure
+plus `--max-free` seizure-free files per subject; -1 keeps every file).
 
 One shard per CHB-MIT case or Siena subject: <out>/<dataset>/<case>.npz with
   X          float16 (N, 18, T)   windows ALREADY NORMALIZED per window (per_window_robust below), T = 4 s x fs,
@@ -75,11 +76,41 @@ def siena_blocks(text: str) -> list[tuple[str, str]]:
     return out
 
 
+def _canon_siena(name: str) -> str:
+    return re.sub(r"^PNO(?=\d)", "PN0", name.strip().upper())        # PN06 lists write "PNO6-1.edf" (letter O)
+
+
+def siena_name_match(listed: str, edf_name: str) -> bool:
+    """A list's 'File name:' against an EDF name, tolerating the real lists' typos: letter O for zero (PN06) and a
+    bare subject name for its first file (PN01 lists 'PN01.edf' for PN01-1.edf)."""
+    a, b = _canon_siena(listed), _canon_siena(edf_name)
+    return a == b or ("-" not in a and b == a.replace(".EDF", "-1.EDF"))
+
+
+def siena_is_listed(text: str, edf_name: str) -> bool:
+    return any(siena_name_match(n, edf_name) for n, _ in siena_blocks(text))
+
+
+def siena_files(root: Path, max_free: int) -> list[tuple[Path, str, str]]:
+    """evade.training.data.siena_jobs with siena_name_match: every listed file + `max_free` unlisted per subject."""
+    jobs = []
+    for subj in sorted(p for p in root.glob("PN[0-9][0-9]") if p.is_dir()):
+        lst = next(iter(sorted(subj.glob("Seizures-list-*.txt"))), None)
+        text = lst.read_text(errors="ignore") if lst else ""
+        free = 0
+        for edf in sorted(subj.glob("*.edf")):
+            if siena_is_listed(text, edf.name):
+                jobs.append((edf, text, subj.name))
+            elif free < max_free:
+                jobs.append((edf, text, subj.name)); free += 1
+    return jobs
+
+
 def siena_segments(text: str, edf_name: str, rec_dur: float) -> tuple[list, list]:
     """Seizures of one Siena file as (start_s, end_s) offsets, split into usable and inconsistent ones."""
     segs = []
     for name, block in siena_blocks(text):
-        if name != edf_name:
+        if not siena_name_match(name, edf_name):
             continue
         _, sz = parse_siena_seizure_list(block)
         segs += [((s - reg) % 86400.0, (e - reg) % 86400.0) for reg, s, e in sz]   # modulo: midnight rollover
@@ -199,7 +230,7 @@ def pack_subject(job: dict) -> dict:
         n_bad += r["n_bad_annotations"]
         rec_idx.append(np.full(len(r["y"]), i, np.int16))
         parts.append(r)
-        listed = job["dataset"] == "siena" and any(n == Path(edf).name for n, _ in siena_blocks(str(info)))
+        listed = job["dataset"] == "siena" and siena_is_listed(str(info), Path(edf).name)
         if listed and not r["seizures"]:
             log.append(f"WARNING {Path(edf).name}: listed in the seizure file but no usable seizure parsed")
         log.append(f"{Path(edf).name}: {len(r['y'])} windows, {int((r['y'] == 1).sum())} ictal, "
@@ -252,13 +283,13 @@ def build_jobs(a) -> list[dict]:
             jobs.append({"dataset": "chbmit", "case": case, "files": files})
     if a.siena:
         by_subj: dict[str, list] = {}
-        for edf, text, subj in beta_data.siena_jobs(Path(a.siena), max_free):
+        for edf, text, subj in siena_files(Path(a.siena), max_free):
             by_subj.setdefault(subj, []).append((str(edf), text))
         for subj, files in sorted(by_subj.items()):
             if a.cases and subj not in a.cases:
                 continue
             if a.smoke:
-                files = _smoke_pick(files, lambda f: any(n == Path(f[0]).name for n, _ in siena_blocks(f[1])), 2, 0)
+                files = _smoke_pick(files, lambda f: siena_is_listed(f[1], Path(f[0]).name), 2, 0)
             jobs.append({"dataset": "siena", "case": subj, "files": files})
     for j in jobs:
         j.update(out=str(a.out), fs=float(a.fs), smoke=bool(a.smoke), min_channels=int(a.min_channels))

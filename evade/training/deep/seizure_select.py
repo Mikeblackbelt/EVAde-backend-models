@@ -7,8 +7,8 @@ dataset's SHA256SUMS listing, so the download fetches exactly the files the pack
 Reads "hash  path" lines, prints the lines to keep: every non-EDF line, every EDF with a seizure, and the first
 `--max-free` seizure-free EDFs per subject in sorted order (-1 keeps every EDF). Seizure files come from the
 summaries already downloaded into --root (CHB-MIT chbNN-summary.txt, parsed with the pack's parser; Siena
-Seizures-list-*.txt, a file counts if its name appears in the list, as siena_jobs does). A missing summary is an
-error, never "no seizures". Data files are read as text only.
+Seizures-list-*.txt with the pack's name match, seizure_pack.siena_is_listed). A missing summary is an error, never
+"no seizures". Data files are read as text only.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from ...preprocessing.eeg import parse_chb_summary
+from .seizure_pack import siena_is_listed
 
 
 def seizure_test(dataset: str, root: Path, case: str):
@@ -30,7 +31,7 @@ def seizure_test(dataset: str, root: Path, case: str):
     if not lst:
         raise FileNotFoundError(f"no Seizures-list-*.txt in {root / case}: download the lists first")
     text = lst[0].read_text(errors="ignore")
-    return lambda name: name in text
+    return lambda name: siena_is_listed(text, name)
 
 
 def select(dataset: str, root: Path, lines: list[str], max_free: int) -> list[str]:

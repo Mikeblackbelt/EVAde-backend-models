@@ -187,10 +187,26 @@ def test_download_selection_matches_pack_rule(packed):
     sroot = tmp / "siena"
     slines = [f"{'0' * 64}  {p.relative_to(sroot).as_posix()}" for p in sorted(sroot.rglob("*")) if p.is_file()]
     got = [ln.split()[1] for ln in seizure_select.select("siena", sroot, slines, 0)]
-    want = [f"{s}/{Path(edf).name}" for edf, _, s in beta_data.siena_jobs(sroot, 0)]
+    want = [f"{s}/{Path(edf).name}" for edf, _, s in seizure_pack.siena_files(sroot, 0)]
     assert [g for g in got if g.endswith(".edf")] == want and "PN00/Seizures-list-PN00.txt" in got
     with pytest.raises(FileNotFoundError):                 # a missing summary is an error, never "no seizures"
         seizure_select.select("chbmit", tmp / "nowhere", lines, 3)
+
+
+def test_siena_list_typos():
+    """Real Siena lists: PN06 writes 'PNO6-1.edf' (letter O), PN01 lists 'PN01.edf' for PN01-1.edf, with two
+    seizures in one block, colon times and a midnight rollover."""
+    m = seizure_pack.siena_name_match
+    assert m("PNO6-1.edf", "PN06-1.edf") and m("PN01.edf", "PN01-1.edf") and m("PN03-2.edf", "PN03-2.edf")
+    assert not m("PN01.edf", "PN01-2.edf") and not m("PN06-1.edf", "PN06-2.edf")
+    pn01 = ("Seizure n 1\nFile name: PN01.edf\nRegistration start time: 19.00.44\nRegistration end time: 08.29.41\n"
+            "Start time: 21:51:02\nEnd time: 21.51.56\nStart time: 07.53.17\nEnd time: 07.54.31\n")
+    good, bad = seizure_pack.siena_segments(pn01, "PN01-1.edf", 13.5 * 3600)
+    assert bad == [] and [(round(a), round(b)) for a, b in good] == [(10218, 10272), (46353, 46427)]
+    assert seizure_pack.siena_listed_seizures(pn01) == 2
+    assert seizure_pack.siena_segments("File name: PNO6-1.edf\nRegistration start time: 04.21.22\n"
+                                       "Seizure start time: 05.54.25\nSeizure end time: 05.55.29\n",
+                                       "PN06-1.edf", 9000.0)[0] == [(5583.0, 5647.0)]
 
 
 def test_sigusr1_on_last_step_validates_then_resumes(packed):

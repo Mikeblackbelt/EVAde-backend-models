@@ -37,6 +37,7 @@ Packing reuses the beta preprocessing:
   - Windows from 60 s before a seizure to 120 s after it are -1.
   - Siena annotations that end after the recording does are never labelled ictal (the PN00-3 case).
   - **Siena seizure lists differ from the beta.** A list repeats `File name:` for every seizure, so a file can have several blocks, and the beta parser read only the first block per file. This pack reads every block, and also accepts `Start time:` and `End time:` lines without the word "Seizure". Siena labels, and therefore Siena metrics, can differ from the beta's on the same subjects.
+  - **The real lists have name typos**, checked on the Siena-6 lists. PN06 writes `PNO6-1.edf` (letter O) for files 1, 2 and 4. PN01 lists `PN01.edf` for `PN01-1.edf`, with two seizures in one block. An exact name match would label those seizures non-ictal, so the pack, the file rule (`siena_files`) and the download all use `siena_name_match`, which tolerates both typos. The other eight subjects' lists have not been checked. A mismatch there prints a WARNING, and the gate stops.
 - The beta file rule from `evade/training/data.py` (`chb_jobs`, `siena_jobs`): every file with a seizure, plus 3 seizure-free files per subject. The download fetches exactly these files, so the pack sees the same set. `--max-free -1` (and `MAX_FREE=-1` for the download) keeps every file.
 
 Windows are 4 s (1,024 samples) with a 2 s step. They are normalized (below) and stored as float16 in `data/seizure256/{chbmit,siena}/<case>.npz` with these arrays:
