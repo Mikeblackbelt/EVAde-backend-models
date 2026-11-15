@@ -143,7 +143,7 @@ class State:
     archives) is written to storage before the response, and either storage goes first or the change is idempotent,
     so a 503 and a client retry never apply it twice. Audit rows (inputs, flags, risk results) and the latest
     comparisons are best effort: a failure gives a warning, not a 503; latest and the EEG baseline are retried by the
-    next request's flush."""
+    flush of the next request that does storage work."""
 
     def __init__(self):
         self.storage = storage_mod.from_env()
@@ -170,6 +170,25 @@ app = FastAPI(title="EVAde model service", version=API_VERSION, description="Bet
               docs_url="/docs" if _DOCS else None, redoc_url="/redoc" if _DOCS else None,
               openapi_url="/openapi.json" if _DOCS else None)
 STATE = State()
+
+
+class WebSocketKeyGuard:
+    """The http middleware below never sees WebSocket connections: close any without the key (policy violation)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            want = API_KEY_HEADER.encode("latin-1")
+            sent = next((v for k, v in scope.get("headers") or [] if k.lower() == want), None)
+            if not key_ok(sent.decode("latin-1") if sent is not None else None):
+                await send({"type": "websocket.close", "code": 1008})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(WebSocketKeyGuard)
 
 # path and query parameters get the same patterns as the request bodies
 UserIdPath = Annotated[str, Path(min_length=36, max_length=36, pattern=S.UUID_PATTERN)]
@@ -262,8 +281,10 @@ async def _mw(request: Request, call_next):
         if touched and (STATE.baselines.dirty or STATE.state_dirty):
             try:
                 await run_in_threadpool(flush_all)
-            except StorageError as e:              # kept in memory and marked dirty; the next request retries
+            except StorageError as e:              # kept in memory and marked dirty; a later request retries
                 log.warning("flush failed: %s", e)
+            except Exception as e:                 # noqa: BLE001 - the response is done; log the type only
+                log.error("flush failed with %s in request %s", type(e).__name__, rid)
     return resp
 
 

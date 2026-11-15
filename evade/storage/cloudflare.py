@@ -630,8 +630,8 @@ def check_schema(d1: D1Client) -> int:
     try:
         rows = d1.query("SELECT MAX(version) AS v FROM schema_migrations")
     except D1Error as e:
-        if e.transient:
-            raise
+        if e.transient or "no such table" not in str(e):
+            raise                                # an outage, a bad token or a wrong database ID: not a schema issue
         raise StorageConfigError(f"D1 schema missing (no schema_migrations table). Refusing EVADE_STORAGE=cloudflare: "
                                  f"{hint}") from None
     v = int((rows[0].get("v") if rows else None) or 0)

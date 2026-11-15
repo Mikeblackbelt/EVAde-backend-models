@@ -110,6 +110,9 @@ def test_2_missing_migration_2_refuses_cloudflare_storage(monkeypatch):
     fake.db.commit()
     with pytest.raises(StorageConfigError, match="schema missing"):
         check_schema(d1)
+    fake.fail_with = [403]                          # a bad token is not reported as a schema problem
+    with pytest.raises(D1Error, match="HTTP 403"):
+        check_schema(d1)
 
 
 # ---------------- 4. one deadline per request; no flush without storage work ----------------

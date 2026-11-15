@@ -183,6 +183,36 @@ def test_inputs_are_bounded(path, body, field):
     assert e["field"] == field, e
 
 
+def test_nan_and_infinity_are_rejected():
+    uid = new_user(C, H)
+    h = {**H, "Content-Type": "application/json"}
+    for path, raw in (("/v1/predict/risk", '{"user_id": "%s", "domain_inputs": {"cardiac": {"s": NaN}}}'),
+                      ("/v1/compare", '{"user_id": "%s", "readings": [{"metric": "hr_bpm", "value": Infinity, '
+                                      '"unit": "bpm", "t_utc": "2026-01-01T00:00:00Z"}]}'),
+                      ("/v1/compare", '{"user_id": "%s", "readings": [{"metric": "hr_bpm", "value": 60, '
+                                      '"unit": "bpm", "t_utc": "2026-01-01T00:00:00Z", "quality": NaN}]}')):
+        is_error(C.post(path, content=(raw % uid).encode(), headers=h), 422)
+
+
+def test_websocket_needs_the_key():
+    from starlette.websockets import WebSocket, WebSocketDisconnect
+
+    @A.app.websocket("/v1/ws-test")
+    async def ws(websocket: WebSocket):
+        await websocket.accept()
+        await websocket.send_text("hello")
+        await websocket.close()
+    try:
+        with pytest.raises(WebSocketDisconnect) as ei:
+            with C.websocket_connect("/v1/ws-test") as w:
+                w.receive_text()
+        assert ei.value.code == 1008
+        with C.websocket_connect("/v1/ws-test", headers=H) as w:
+            assert w.receive_text() == "hello"
+    finally:
+        A.app.router.routes[:] = [r for r in A.app.router.routes if getattr(r, "path", "") != "/v1/ws-test"]
+
+
 def test_path_and_query_ids_are_validated():
     is_error(C.get("/v1/users/../../etc/baseline", headers=H), 404)
     assert is_error(C.get("/v1/users/not-a-uuid/baseline", headers=H), 422)["field"] == "user_id"
