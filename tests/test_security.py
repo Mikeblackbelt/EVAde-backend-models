@@ -308,3 +308,32 @@ def test_unhandled_error_logs_only_the_type(api, caplog, monkeypatch):
     is_error(r, 500, "internal_error")
     text = _all_log_text(caplog.records)
     assert "ValueError" in text and uid not in text and str(MARK_VALUE) not in text
+
+
+def test_transfer_encoding_is_refused_so_the_cap_holds():
+    r = C.post("/v1/users", content=b'{"consent": true}',
+               headers={**H, "Content-Type": "application/json", "Transfer-Encoding": "chunked", "Content-Length": "17"})
+    is_error(r, 411, "length_required")
+
+
+def test_trailing_slash_is_not_redirected():
+    r = C.get("/v1/health/", headers=H, follow_redirects=False)
+    assert r.status_code == 404 and "location" not in r.headers
+
+
+def test_dict_keys_are_masked_in_the_field_path(api):
+    client, headers = api[0], api[1]
+    uid = new_user(client, headers)
+    r = client.post("/v1/predict/risk", headers=headers,
+                    json={"user_id": uid, "domain_inputs": {"SECRET_VALUE_7731": {"s": 0.5}}})
+    assert r.status_code == 422 and "SECRET_VALUE_7731" not in r.text
+
+
+@pytest.mark.parametrize("key", ["K" * 32 + " ", " " + "K" * 32, "é" * 32, "K" * 16 + "	" + "K" * 16])
+def test_unsendable_keys_are_refused(key):
+    assert A.api_key_problem(key) is not None
+
+
+def test_dockerfile_trusts_the_proxy_scheme():
+    text = (ROOT / "Dockerfile").read_text()
+    assert "--forwarded-allow-ips" in text

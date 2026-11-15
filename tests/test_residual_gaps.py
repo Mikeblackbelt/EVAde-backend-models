@@ -68,7 +68,7 @@ def test_1_archived_id_of_another_user_does_not_block_a_live_baseline():
     assert fake.count("baselines", "ub") == 1
 
 
-def test_1_reset_whose_archive_committed_but_response_was_lost_settles_memory():
+def test_1_reset_whose_archive_response_was_lost_is_retried_and_settles():
     fake = FakeD1()
     lost = []
 
@@ -87,7 +87,7 @@ def test_1_reset_whose_archive_committed_but_response_was_lost_settles_memory():
     bs = BaselineStore(st)
     bs.add("u", "ecg", "hr_bpm", 60.0)
     bs.flush()
-    assert bs.reset("u", "ecg") == 1 and lost        # the archive is checked, so memory follows storage
+    assert bs.reset("u", "ecg") == 1 and lost        # retried once (idempotent), so memory follows storage
     assert bs.for_user("u") == [] and fake.count("baselines", "u") == 0 and fake.count("baseline_archive", "u") == 1
 
 
@@ -314,3 +314,59 @@ def test_12_raw_window_put_landing_after_delete_is_removed(api):
     assert s3.keys(f"raw/{uid}/") == []             # before the fix: an orphan blob that no DELETE would remove
     for t in USER_TABLES:
         assert fake.count(t, uid) == 0, t
+
+
+def test_1_reset_that_keeps_failing_raises_and_keeps_memory():
+    """A partly committed archive must not be reported as done: the retry fails too, so reset raises and memory
+    keeps the baselines (the client's retry finishes the idempotent archive)."""
+    fake = FakeD1()
+    calls = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        if "batch" in body and "baseline_archive" in json.dumps(body):
+            calls.append(1)
+            if len(calls) > 1:
+                return httpx.Response(503, json={"success": False, "errors": [{"message": "unavailable"}]})
+        return fake.handler(request)
+
+    from evade.storage.cloudflare import CloudflareBackend
+    d1 = D1Client("acct", "db", TOKEN, transport=httpx.MockTransport(handler), sleep=lambda s: None, retries=0)
+    st = CloudflareBackend(d1, R2Blobs("bkt", FakeS3()))
+    st.put_user("u", {"created_at": 1.0})
+    bs = BaselineStore(st)
+    bs.add("u", "ecg", "hr_bpm", 60.0)
+    bs.flush()
+    calls.clear()
+
+    def failing_archive(user_id, modality, recs):
+        calls.append(1)
+        raise StorageError("unavailable")
+
+    st.archive_baselines = failing_archive
+    with pytest.raises(StorageError):
+        bs.reset("u", "ecg")
+    assert len(calls) == 2                       # one retry, then give up
+    assert len(bs.for_user("u")) == 1            # memory untouched
+
+
+def test_12_failed_later_put_still_rechecks_the_tombstone(monkeypatch):
+    from evade.api import app as A
+    deleted, puts = [], []
+    st = A.STATE.storage
+
+    def put(user_id, wid, data):
+        puts.append(wid)
+        if len(puts) == 2:
+            raise StorageError("put failed")
+        return f"raw/{user_id}/{wid}.json"
+
+    monkeypatch.setattr(st, "store_raw_windows", True, raising=False)
+    monkeypatch.setattr(st, "put_raw_window", put)
+    monkeypatch.setattr(st, "is_deleted", lambda uid: True)
+    monkeypatch.setattr(st, "delete_blobs", lambda keys: deleted.extend(keys))
+    from evade.api import schemas as S
+    w = S.Window(**ecg_window())
+    with pytest.raises(StorageError):
+        A.input_rows(str(uuid.uuid4()), [w, w], "/v1/compare")
+    assert len(deleted) == 1                     # the blob written before the failure is removed

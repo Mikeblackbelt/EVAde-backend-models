@@ -233,7 +233,7 @@ def test_f3_reset_archives_in_storage_before_memory(api):
     C, H, A, st, fake, s3 = api
     uid = new_user(C, H)
     C.post("/v1/baseline/vitals", json={"user_id": uid, "readings": readings(4), "mode": "demo"}, headers=H)
-    fake.fail_with = [503] * 3
+    fake.fail_with = [503] * 6                      # both the archive call and its one retry fail
     r = C.post("/v1/baseline/vitals/reset", json={"user_id": uid, "reason": "user_request"}, headers=H)
     assert r.status_code == 503
     assert A.STATE.baselines.for_user(uid)          # memory untouched, so the retry archives the same baseline

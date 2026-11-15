@@ -84,6 +84,8 @@ def api_key_problem(key: str | None) -> str | None:
         return f"{API_KEY_ENV} is not set"
     if len(key) < API_KEY_MIN_LEN:
         return f"{API_KEY_ENV} must be at least {API_KEY_MIN_LEN} characters"
+    if not re.fullmatch(r"[!-~]+", key):
+        return f"{API_KEY_ENV} must be printable ASCII with no spaces (a header cannot carry other characters reliably)"
     return None
 
 
@@ -168,7 +170,7 @@ class State:
 _DOCS = os.environ.get("EVADE_ENABLE_DOCS") == "1"      # off by default; behind the key like every path when on
 app = FastAPI(title="EVAde model service", version=API_VERSION, description="Beta. Flags for human review, not diagnoses.",
               docs_url="/docs" if _DOCS else None, redoc_url="/redoc" if _DOCS else None,
-              openapi_url="/openapi.json" if _DOCS else None)
+              openapi_url="/openapi.json" if _DOCS else None, redirect_slashes=False)
 STATE = State()
 
 
@@ -222,7 +224,9 @@ _VALUE_CODES = ("future_timestamp", "nan_in_signal", "bad_shape", "payload_too_l
 
 def _loc(loc) -> str:
     """Field path of a validation error. Dict keys a client chose are not echoed (pydantic puts them in loc)."""
-    out = [str(x) if isinstance(x, int) or _SAFE_LOC.match(str(x)) else "<key>" for x in loc]
+    loc = list(loc)
+    out = [str(x) if (isinstance(x, int) or _SAFE_LOC.match(str(x))) and not (i + 1 < len(loc) and loc[i + 1] == "[key]")
+           else "<key>" for i, x in enumerate(loc)]
     return ".".join(out[1:] if out and out[0] in ("body", "query", "path", "header") else out) or None
 
 
@@ -261,6 +265,9 @@ async def _mw(request: Request, call_next):
         return error_response(403, "https_required", "use HTTPS")
     if not key_ok(request.headers.get(API_KEY_HEADER)):
         return error_response(401, "unauthenticated", "missing or invalid X-EVAde-Key header")
+    if "transfer-encoding" in request.headers:
+        # with Transfer-Encoding the body is framed by chunks and Content-Length is ignored: the cap would not hold
+        return error_response(411, "length_required", "Content-Length header required; chunked bodies are not accepted")
     if request.method in ("POST", "PUT", "PATCH"):
         cl = request.headers.get("content-length")
         if cl is None or not cl.isdigit():
@@ -432,20 +439,22 @@ def input_rows(user_id: str, windows: list, endpoint: str, readings: list = ()) 
              "meta": {"endpoint": endpoint, "metric": r.metric, "value": r.value, "unit": r.unit, "quality": r.quality}}
             for r in readings]
     keys = []
-    for w in windows:
-        key = STATE.storage.put_raw_window(user_id, uuid.uuid4().hex, w.model_dump_json().encode()) \
-            if STATE.storage.store_raw_windows else None
-        if key:
-            keys.append(key)
-        rows.append({"kind": f"window:{w.modality}", "t_utc": w.t0_utc.isoformat(), "blob_key": key,
-                     "meta": {"endpoint": endpoint, "fs_hz": w.fs_hz, "channels": len(w.channels),
-                              "n_samples": len(w.samples[0]) if w.samples else 0, "source": w.source}})
-    # R2 has no tombstone guard: a DELETE that listed raw/<user_id>/ while these PUTs were in flight missed them.
-    # Its tombstone is written before that listing, so checking it after the PUTs catches the race (best effort: a
-    # crash between the PUT and this check can still leave an orphan blob).
-    if keys and STATE.storage.is_deleted(user_id):
-        STATE.storage.delete_blobs(keys)
-        return []
+    try:
+        for w in windows:
+            key = STATE.storage.put_raw_window(user_id, uuid.uuid4().hex, w.model_dump_json().encode())                 if STATE.storage.store_raw_windows else None
+            if key:
+                keys.append(key)
+            rows.append({"kind": f"window:{w.modality}", "t_utc": w.t0_utc.isoformat(), "blob_key": key,
+                         "meta": {"endpoint": endpoint, "fs_hz": w.fs_hz, "channels": len(w.channels),
+                                  "n_samples": len(w.samples[0]) if w.samples else 0, "source": w.source}})
+    finally:
+        # R2 has no tombstone guard: a DELETE that listed raw/<user_id>/ while these PUTs were in flight missed them.
+        # Its tombstone is written before that listing, so checking it after the PUTs catches the race, also when a
+        # later PUT failed (best effort: a crash between the PUT and this check can still leave an orphan blob).
+        if keys and STATE.storage.is_deleted(user_id):
+            STATE.storage.delete_blobs(keys)
+            keys.clear()
+            rows = []
     return rows
 
 

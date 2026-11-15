@@ -18,4 +18,4 @@ COPY evade ./evade
 RUN useradd --create-home --uid 10001 evade
 USER evade
 EXPOSE 8000
-CMD ["uvicorn", "evade.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--no-access-log"]
+CMD ["uvicorn", "evade.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]

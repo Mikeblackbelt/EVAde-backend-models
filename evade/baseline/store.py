@@ -200,8 +200,8 @@ class BaselineStore:
         """Archive in storage first (a failure leaves memory untouched, so a retry archives the same baselines), then
         in memory. Storage archives exactly the snapshot's baseline_ids, in-memory records included, so a flush that
         took its snapshot before the reset cannot write them back, and a baseline created after the snapshot stays.
-        If the archive call fails in a way that may have committed (an outage, a lost response), the archive is
-        checked: when every snapshot id is archived, memory follows instead of keeping baselines storage dropped.
+        A transient archive failure is retried once (the statements are idempotent); a second failure raises, memory
+        stays as it was, and the client's retry archives the same baselines.
 
         Known limit: a submit for one of these metrics that lands while the archive call is in flight adds to the old
         baseline, which is then archived, so that submit's values go to the archive with it."""
@@ -214,12 +214,11 @@ class BaselineStore:
             except StorageError as e:
                 if not getattr(e, "transient", True):
                     raise
-                try:
-                    done = self._storage.archived_baseline_ids(user_id, snap.values())
-                except StorageError:
-                    raise e from None
-                if done != set(snap.values()):
-                    raise
+                # the archive statements are idempotent (insert-or-ignore, copy, delete by id): retry once, so a call
+                # that committed only part of its batches finishes; if it still fails, memory is untouched and the
+                # 503 makes the client retry. (Settling from the archive table alone could report success while
+                # the live rows were never deleted.)
+                self._storage.archive_baselines(user_id, modality, recs)
         with self._lock:
             n = 0
             for k, bid in snap.items():
