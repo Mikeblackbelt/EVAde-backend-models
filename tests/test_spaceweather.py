@@ -509,6 +509,17 @@ def test_background_maps_floor_to_reference_and_keeps_events():
     assert n["p10"].iloc[0] == pytest.approx(0.3) and warn
 
 
+def test_background_per_year_nearest():
+    tab = {"reference": "15", "satellites": {"15": {"p10": 0.2, "p50": 0.05, "p100": 0.02},
+                                             "16": {"p10": 9.0, "p50": 9.0, "p100": 9.0},
+                                             "16:2021": {"p10": 0.7, "p50": 0.5, "p100": 0.45},
+                                             "16:2023": {"p10": 0.4, "p50": 0.25, "p100": 0.2}}}
+    idx = pd.DatetimeIndex(["2021-06-01", "2024-06-01"], tz="UTC")
+    h = pd.DataFrame({"p10": [0.7, 0.4], "p50": [0.5, 0.25], "p100": [0.45, 0.2], "sat": 16.0}, index=idx)
+    c, warn = BG.correct_hourly(h, tab)
+    assert list(c["p10"].round(6)) == [0.2, 0.2] and list(c["p100"].round(6)) == [0.02, 0.02] and not warn
+
+
 def test_background_estimate_and_overlap_agreement():
     rng = np.random.default_rng(0)
     n = 24 * 40

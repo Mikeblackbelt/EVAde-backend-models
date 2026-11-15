@@ -7,8 +7,10 @@ During events the flux is far above both floors, so the shift is negligible ther
 instrument offset that the forecast features would otherwise see.
 
 b_sat per channel = 25th percentile of the hourly flux over that satellite's quiet hours (hourly >=10 MeV below
-10 pfu and no hour at or above 10 pfu within 72 h). Values are re-estimated by training (saved with the model) and
-the defaults below are the documented fallback. An unknown satellite gets no correction (b_sat = b_ref), with a warning.
+10 pfu and no hour at or above 10 pfu within 72 h), per satellite and calendar year (floors drift with the solar
+cycle and changed with GOES-16's 2022 reprocessing), with the nearest year or the all-years value as fallback.
+The reference floor is GOES-15's all-years value. Values are estimated by training (saved with the model); the
+committed background_default.json is the documented fallback. An unknown satellite gets no correction, with a warning.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ CHANNELS = {"p10": "proton_10mev_pfu", "p50": "proton_50mev_pfu", "p100": "proto
 REFERENCE_SAT = "15"
 DEFAULT_PATH = Path(__file__).with_name("background_default.json")
 QUIET_PCTL = 25
+MIN_QUIET_H_YEAR = 500
 
 
 def load_table(path: Path | None = None) -> dict:
@@ -39,21 +42,39 @@ def correct_hourly(h: pd.DataFrame, table: dict, prefix: str = "") -> tuple[pd.D
     ref = table["satellites"].get(table.get("reference", REFERENCE_SAT))
     if ref is None:
         return h, ["background table has no reference satellite: not corrected"]
+    sats = table["satellites"]
     sat = h["sat"] if "sat" in h.columns else pd.Series(np.nan, index=h.index)
-    keys = sat.map(lambda s: f"{prefix}{int(s)}" if pd.notna(s) else None)
-    unknown = sorted({k for k in keys.dropna().unique() if k not in table["satellites"]})
+    base = sat.map(lambda s: f"{prefix}{int(s)}" if pd.notna(s) else None)
+    years = pd.Series(h.index.year, index=h.index)
+    per_year: dict[str, list[int]] = {}
+    for k in sats:
+        head, _, tail = k.rpartition(":")
+        if head and len(tail) == 4 and tail.isdigit():          # "16:2021" -> year entry of "16"
+            per_year.setdefault(head, []).append(int(tail))
+
+    def pick(bk, y):
+        """Background entry: same satellite and year, else its nearest year, else its all-years value."""
+        ys = per_year.get(bk)
+        if ys:
+            return sats[f"{bk}:{min(ys, key=lambda v: abs(v - y))}"]
+        return sats.get(bk)
+    unknown, b = set(), {c: pd.Series(np.nan, index=h.index) for c in CHANNELS}
+    for (bk, y), idx in h.groupby([base, years]).groups.items():
+        e = pick(bk, y)
+        if e is None:
+            unknown.add(bk)
+            e = ref
+        for c in CHANNELS:
+            b[c].loc[idx] = ref[c] if e.get(c) is None else e[c]
     if unknown:
-        warn.append(f"no background values for {', '.join(unknown)}: proton background not corrected")
-    if keys.isna().any() and h["p10"].notna().any():
+        warn.append(f"no background values for {', '.join(sorted(unknown))}: proton background not corrected")
+    if base.isna().any() and h["p10"].notna().any():
         warn.append("proton satellite unknown for some hours: background not corrected there")
     for col in CHANNELS:
         if col not in h.columns:
             continue
-        def bval(k, col=col):
-            v = table["satellites"].get(k, ref).get(col) if k else None
-            return ref[col] if v is None else v
-        b = keys.map(bval).astype(float)
-        h[col] = np.maximum(h[col] - b + ref[col], 0.1 * ref[col]).where(h[col].notna())
+        bb = b[col].fillna(ref[col])
+        h[col] = np.maximum(h[col] - bb + ref[col], 0.1 * ref[col]).where(h[col].notna())
     return h, warn
 
 
@@ -64,18 +85,25 @@ def quiet_mask(p10: pd.Series, guard_h: int = 72) -> pd.Series:
     return p10.notna() & (p10 < 10.0) & ~near
 
 
-def estimate(hourly_by_sat: dict[str, pd.DataFrame], exclude: list[tuple[str, str]] | None = None) -> dict:
-    """b_sat per channel from each satellite's own uncorrected hourly series. `exclude` drops (start, end) windows
-    (the overlap periods kept back for validation)."""
+def estimate(hourly_by_sat: dict[str, pd.DataFrame], exclude: list[tuple[str, str]] | None = None,
+             by_year: bool = True) -> dict:
+    """b_sat per channel from each satellite's own uncorrected hourly series: an all-years value ("16") and one per
+    calendar year with enough quiet hours ("16:2021"). `exclude` drops (start, end) windows (overlaps kept back
+    for validation)."""
     sats = {}
+    est = lambda h, m: {**{c: float(np.nanpercentile(h.loc[m, c], QUIET_PCTL)) if h.loc[m, c].notna().any() else None
+                           for c in CHANNELS}, "quiet_hours": int(m.sum())}
     for s, h in hourly_by_sat.items():
         m = quiet_mask(h["p10"])
         for a, b in exclude or []:
             m &= ~((h.index >= pd.Timestamp(a, tz="UTC")) & (h.index < pd.Timestamp(b, tz="UTC")))
-        sats[s] = {c: float(np.nanpercentile(h.loc[m, c], QUIET_PCTL)) if h.loc[m, c].notna().any() else None
-                   for c in CHANNELS}
-        sats[s]["quiet_hours"] = int(m.sum())
-    ok = [s for s in sats if all(sats[s][c] is not None for c in CHANNELS)]
+        sats[s] = est(h, m)
+        if by_year:                          # floors drift with the solar cycle and with processing versions
+            for y in sorted(set(h.index.year)):
+                my = m & (h.index.year == y)
+                if my.sum() >= MIN_QUIET_H_YEAR:
+                    sats[f"{s}:{y}"] = est(h, my)
+    ok = [s for s in sats if ":" not in s and all(sats[s][c] is not None for c in CHANNELS)]
     ref = REFERENCE_SAT if REFERENCE_SAT in ok else (sorted(ok)[-1] if ok else REFERENCE_SAT)
     return {"reference": ref, "percentile": QUIET_PCTL, "satellites": sats}
 

@@ -44,7 +44,8 @@ def integral_from_differential(j: np.ndarray, lo: np.ndarray, hi: np.ndarray, p1
 def read_sgps_day(path: Path) -> pd.DataFrame:
     import h5py
     with h5py.File(path, "r") as h:
-        t = J2000 + pd.to_timedelta(_arr(h, "L2_SciData_TimeStamp"), unit="s")
+        tname = "L2_SciData_TimeStamp" if "L2_SciData_TimeStamp" in h else "time"     # v1/v2 vs v3 files
+        t = J2000 + pd.to_timedelta(_arr(h, tname), unit="s")
         j = _arr(h, "AvgDiffProtonFlux")                         # (time, unit, channel)
         valid = h["DiffValidL1bSamplesInAvg"][()]
         j[(valid == 0) | (valid == 4294967295)] = np.nan
