@@ -20,7 +20,7 @@ This is the deep model for sleep staging, from section 5.2 of [training-plan-v2.
 - Polite: one file at a time, a 2 s pause between files, and a rate cap of 5 MB/s by default.
 - Resumable: `wget -c` continues partial files, and verified files are skipped. A file that fails its checksum is deleted, so the next run fetches it again.
 - Files get their arrival time as the timestamp, because scratch is purged by file age.
-- When every file is verified, the script writes a `VERIFIED` marker.
+- The script writes a `VERIFIED` marker only when the full set of 306 files is verified, never after a `LIMIT=` run. `sleep_prep.sbatch` requires the marker for a full pack.
 
 **Packing details:**
 - **Signals:** Fpz-Cz and Pz-Oz at 100 Hz, raw microvolts, no filtering, cut into 30 s epochs of 3,000 samples.
@@ -65,18 +65,23 @@ This is the deep model for sleep staging, from section 5.2 of [training-plan-v2.
 Run these on arrow as the cluster user, with `PROJECT=/scratch/$USER/evade`. The code is uploaded as in [hpc/README.md](../hpc/README.md) (`git archive` of a commit, unpacked to `$PROJECT/code`, hash in `code/COMMIT`). The venv comes from `setup_env_uv.sh`.
 
 ```
-# 1. download (login node; network only). In tmux, or with nohup as shown:
+# 1a. smoke download (login node): the first 20 files are exactly the 10 beta nights (SC400-SC404), about 0.5 GB
 mkdir -p $PROJECT/slurm $PROJECT/data/raw
+LIMIT=20 bash $PROJECT/code/evade/training/hpc/sleep_download.sh       # no VERIFIED marker for a partial set
+# 1b. smoke pack of those 10 nights: the log must say "beta check: SC400-SC404 kept 10589 epochs ... MATCH"
+cd $PROJECT/code/evade/training/hpc
+sbatch --export=ALL,SMOKE=1 sleep_prep.sbatch
+tail -n 3 $PROJECT/data/sleep-sc/sleep_sc_smoke.pack.log
+
+# 2. full download (login node; network only), in tmux or with nohup; it skips the files it already verified
 nohup bash $PROJECT/code/evade/training/hpc/sleep_download.sh > $PROJECT/data/raw/sleep-download.log 2>&1 &
 tail -n 3 $PROJECT/data/raw/sleep-download.log         # ends with "verified 306/306, failed 0"; rerun to resume
 
-# 2. pack (CPU job); a smoke run on 10 nights first is optional
-cd $PROJECT/code/evade/training/hpc
-sbatch --export=ALL,SMOKE=1 sleep_prep.sbatch
+# 3. full pack (CPU job; needs the VERIFIED marker)
 sbatch sleep_prep.sbatch
 tail -n 3 $PROJECT/data/sleep-sc/sleep_sc.pack.log      # "beta check: SC400-SC404 kept N epochs (beta: 10589)"
 
-# 3. train (GPU job): smoke, then full
+# 4. train (GPU job): smoke, then full
 sbatch --export=ALL,SMOKE=1 --time=00:20:00 --signal=B:USR1@60 sleep_deep.sbatch
 sbatch sleep_deep.sbatch
 sacct -j <id> --format=JobID,State,Elapsed,MaxRSS,ExitCode
@@ -111,12 +116,17 @@ runs/sleep-deep-<commit10>/
 
 ## Local test
 
-`python -m pytest -q tests/test_deep_sleep.py` runs on CPU in about 1 minute, on synthetic EDF files written by the test. It covers:
+`python -m pytest -q tests/test_deep_sleep.py` runs on CPU in about 1-1.5 minutes on a busy laptop (the end-to-end test takes about 40 s), on synthetic EDF files written by the test. It covers:
 - reading, checked against mne's EDF reader;
 - labels and trimming, checked against the beta functions;
 - metrics, checked against sklearn;
 - pack, a 1-epoch smoke run of `kfold`, `beta5` and `final`, then export with ONNX parity;
 - an interrupt-and-resume check.
+
+The reader was also checked once, outside the tests, on one real night (SC4001E0-PSG and SC4001EC-Hypnogram, with sha256 matching PhysioNet). The results:
+- The signals match mne to within 1e-5 µV.
+- The 154 annotations are identical.
+- The night packs to 841 epochs (W 188, N1 58, N2 250, N3 220, REM 125).
 
 ## Limits and safety
 

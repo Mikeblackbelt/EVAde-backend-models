@@ -1,4 +1,4 @@
-﻿"""Deep sleep staging on synthetic Sleep-EDFx-like EDF files (no real data): EDF reading, labels and trimming,
+"""Deep sleep staging on synthetic Sleep-EDFx-like EDF files (no real data): EDF reading, labels and trimming,
 metrics, then the whole pipeline on CPU: pack, a 1-epoch smoke train (kfold, beta5, final), export and ONNX parity,
 plus a SIGUSR1-style interrupt and resume."""
 import json
@@ -100,11 +100,9 @@ def raw(tmp_path_factory):
     d = tmp_path_factory.mktemp("sleep_raw") / "sleep-cassette"
     d.mkdir()
     rng = np.random.default_rng(0)
-    for sub in ["SC400", "SC401", "SC402", "SC403", "SC404", "SC405"]:
-        for night in ("1", "2"):
-            if sub == "SC405" and night == "2":
-                continue                                  # one subject with a single night
-            write_night(d, f"{sub}{night}E", rng)
+    # 6 nights, 5 subjects: SC400 has two nights (they must stay in one fold); SC405 is not a beta subject
+    for name in ["SC4001E", "SC4002E", "SC4011E", "SC4021E", "SC4031E", "SC4051E"]:
+        write_night(d, name, rng)
     return d.parent
 
 
@@ -173,7 +171,7 @@ def test_pipeline_end_to_end(raw, tmp_path):
     assert SP.main(["--src", str(raw), "--out", str(npz)]) == 0
     z = np.load(npz, allow_pickle=False)
     assert z["X"].dtype == np.float16 and z["X"].shape[1:] == (2, 3000)
-    assert len(set(z["night"])) == 11 and len(set(z["subject"])) == 6
+    assert len(set(z["night"])) == 6 and len(set(z["subject"])) == 5
     # 65 W + 40 sleep + 65 W -> 60 + 40 + 60 kept, minus the movement epoch
     assert (z["night"] == "SC4001E").sum() == 159
     assert set(np.unique(z["y"])) <= {0, 1, 2, 3, 4}
@@ -212,7 +210,7 @@ def test_pipeline_end_to_end(raw, tmp_path):
 
 def test_interrupt_and_resume(raw, tmp_path, monkeypatch):
     npz = tmp_path / "sleep_sc.npz"
-    SP.main(["--src", str(raw), "--out", str(npz), "--limit", "4"])   # SC400, SC401: 1 train + 1 val subject
+    SP.main(["--src", str(raw), "--out", str(npz), "--limit", "3"])   # SC400, SC401: one train, one val subject
     run = tmp_path / "final"
     real_predict = ST.predict
 
