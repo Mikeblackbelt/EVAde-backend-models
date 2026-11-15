@@ -520,6 +520,16 @@ def test_background_per_year_nearest():
     assert list(c["p10"].round(6)) == [0.2, 0.2] and list(c["p100"].round(6)) == [0.02, 0.02] and not warn
 
 
+def test_posted_operational_flux_uses_swpc_floor():
+    recs = [Record.make(NOW - timedelta(minutes=5 * k), proton_10mev_pfu=0.25, proton_50mev_pfu=0.18,
+                        proton_100mev_pfu=0.17, proton_satellite=18) for k in range(600)]
+    op = Observations("request", recs, meta={"background_prefix": "swpc:"})
+    row, cov = latest_features(op, table=TABLE)
+    assert row["lp10"] == pytest.approx(np.log10(0.2)) and not cov["warnings"]   # SWPC floor -> reference floor
+    arch, _ = latest_features(Observations("request", recs), table=TABLE)
+    assert arch["lp10"] < row["lp10"]           # the archive floor (0.3) would push operational values too low
+
+
 def test_background_estimate_and_overlap_agreement():
     rng = np.random.default_rng(0)
     n = 24 * 40

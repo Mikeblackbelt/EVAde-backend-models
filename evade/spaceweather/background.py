@@ -8,7 +8,8 @@ instrument offset that the forecast features would otherwise see.
 
 b_sat per channel = 25th percentile of the hourly flux over that satellite's quiet hours (hourly >=10 MeV below
 10 pfu and no hour at or above 10 pfu within 72 h), per satellite and calendar year (floors drift with the solar
-cycle and changed with GOES-16's 2022 reprocessing), with the nearest year or the all-years value as fallback.
+cycle), with the nearest year or the all-years value as fallback. A trailing-window floor would track the drift
+better; it is not built (proof of concept).
 The reference floor is GOES-15's all-years value. Values are estimated by training (saved with the model); the
 committed background_default.json is the documented fallback. An unknown satellite gets no correction, with a warning.
 """

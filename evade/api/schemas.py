@@ -193,6 +193,9 @@ class SpaceWeatherRequest(BaseModel):
     measured_dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
     seu_count_last_hour: int = Field(0, ge=0)
     include_donki: bool = Field(True, description="with provider: also fetch NASA DONKI events (CMEs feed the forecast)")
+    proton_source: Literal["swpc_operational", "ncei_archive"] = Field(
+        "swpc_operational", description="with observations: which product the proton values are (selects the "
+                                        "background floor for proton_satellite)")
     cmes: list[CmeIn] | None = Field(None, max_length=200, description="with observations: recent CMEs (optional)")
 
     @model_validator(mode="after")

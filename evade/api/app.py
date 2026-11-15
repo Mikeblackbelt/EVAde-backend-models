@@ -491,7 +491,8 @@ def predict_space_weather(body: S.SpaceWeatherRequest):
     user(body.user_id)
     if body.observations is not None:
         obs = Observations("request", [Record.make(o.t_utc, **o.model_dump(exclude={"t_utc"}, exclude_none=True))
-                                       for o in body.observations])
+                                       for o in body.observations],
+                           meta={"background_prefix": "swpc:" if body.proton_source == "swpc_operational" else ""})
     else:
         try:
             obs = get_provider(body.provider).fetch(SPACEWX_HOURS)
