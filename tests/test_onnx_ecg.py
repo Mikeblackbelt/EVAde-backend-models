@@ -304,6 +304,50 @@ def test_bad_values_and_quality_notes(exported):
     assert any(n.code == "possible_clipping" for n in m.predict(clip, FS, LEADS).notes)
 
 
+def test_input_rate_bounds(exported):
+    m = EcgDeepModel(exported["dir"])
+    for fs in (49.9, 1000.1, 20000.0):
+        with pytest.raises(EcgInputError, match="between 50 and 1000 Hz"):
+            m.preprocess(_ecg(fs=100), fs, LEADS)
+    for fs in (50, 1000):                                      # the bounds themselves are accepted
+        p = m.preprocess(_ecg(fs=fs, seed=4), fs, LEADS)
+        assert p.x.shape == (12, REC) and p.info["padded_samples"] == 0
+    with pytest.raises(EcgInputError, match="factors of at most 100"):
+        m.preprocess(_ecg(fs=50.5), 50.5, LEADS)               # 100/50.5 needs up=196 with down<=100
+    assert m._ratio(1000.0) == (1, 10) and m._ratio(50.0) == (2, 1)
+
+
+def test_input_length_and_row_caps(exported):
+    m = EcgDeepModel(exported["dir"])
+    x60 = _ecg(seconds=60.0, fs=500, seed=5)                    # exactly 60 s: accepted, cropped before resampling
+    p = m.preprocess(x60, 500, LEADS)
+    assert p.x.shape == (12, REC) and p.info["cropped_samples"] == 6000 - REC
+    assert p.info["samples_after_resample"] == REC + 200        # the central 10 s plus 1 s each side, not 60 s
+    assert [n.code for n in p.notes].count("cropped") == 1 and not any(n.code == "padded" for n in p.notes)
+    over = np.concatenate([x60, x60[:, :1]], axis=1)
+    with pytest.raises(EcgInputError, match="at most 60 s"):
+        m.preprocess(over, 500, LEADS)
+    with pytest.raises(EcgInputError, match="at most 60 s"):
+        m.preprocess(_ecg(seconds=61.0, fs=100), 100, LEADS, length_policy="strict")
+    with pytest.raises(EcgInputError, match="expected 1000 samples"):
+        m.preprocess(_ecg(seconds=30.0, fs=500), 500, LEADS, length_policy="strict")   # strict is not pre-cropped
+    with pytest.raises(EcgInputError, match="at most 64 leads"):
+        m.preprocess(np.zeros((65, 1000), np.float32), 100, [f"X{i}" for i in range(65)])
+
+
+def test_precrop_matches_resampling_the_whole_record(exported):
+    """Cropping a long record before resampling gives the same model input as resampling all of it first."""
+    from scipy.signal import resample_poly
+    m = EcgDeepModel(exported["dir"])
+    x = _ecg(seconds=30.0, fs=500, seed=6)
+    p = m.preprocess(x, 500, LEADS)
+    full = resample_poly(x.astype(np.float64), 1, 5, axis=1)
+    off = (full.shape[1] - REC) // 2
+    ref = (full[:, off:off + REC] - exported["mean"][:, None]) / exported["std"][:, None]
+    assert np.abs(p.x - ref).max() / np.abs(ref).max() < 1e-3
+    assert p.info["cropped_samples"] == 3000 - REC and p.info["samples_in"] == 15000
+
+
 def test_module_imports_no_fastapi_or_torch():
     code = ("import sys, evade.models.onnx_ecg; "
             "bad = [m for m in ('fastapi', 'torch', 'onnxruntime', 'starlette') if m in sys.modules]; "

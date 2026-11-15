@@ -11,6 +11,9 @@ when the manifest format is "torchscript"). Preprocessing follows the training c
 per-lead (x - mean) / std from the train folds, sliding windows of crop_samples with stride window_stride_samples
 over record_samples, sigmoid per window, mean over windows.
 
+Input bounds: fs_hz must be 50-1000 Hz, the polyphase up/down factors at most 100, the record at most 60 s and 64
+rows. A longer-than-needed record is cropped to the central record length (plus 1 s each side) before resampling.
+
 The outputs are probabilities for review by a clinician, not diagnoses. Flags are only produced when the manifest
 carries operating points (output.operating_points); no default threshold is invented here.
 
@@ -42,6 +45,11 @@ _UNIT_SCALE = {"MV": 1.0, "UV": 1e-3, "µV".upper(): 1e-3, "μV".upper(): 1e-3, 
 FLAT_STD_MV = 0.005           # a lead with SD below 5 uV is treated as flat or disconnected
 HIGH_AMPLITUDE_MV = 10.0      # a 99.9th percentile |x| above 10 mV suggests wrong units or artefact
 CLIP_FRACTION = 0.02          # more than 2% of samples exactly at the lead's max or min suggests clipping
+# Input bounds (they cap the CPU and memory one request can use)
+MIN_FS_HZ, MAX_FS_HZ = 50.0, 1000.0
+MAX_RESAMPLE_FACTOR = 100     # polyphase up and down factors must both be at most this
+MAX_INPUT_SECONDS = 60.0      # longer records are refused before any copy, scan or resampling
+MAX_INPUT_ROWS = 64           # at most this many leads (rows) per record
 
 
 class ModelIntegrityError(RuntimeError):
@@ -302,14 +310,24 @@ class EcgDeepModel:
             status = "reordered"
         return x[idx], status
 
-    def _resample(self, x: np.ndarray, fs: float, notes: list[QualityNote]) -> np.ndarray:
+    def _ratio(self, fs: float) -> tuple[int, int] | None:
+        """Polyphase (up, down) for fs -> model rate, both at most MAX_RESAMPLE_FACTOR; None when no resampling."""
         if abs(fs - self.fs_hz) < 1e-6 * self.fs_hz:
+            return None
+        frac = Fraction(self.fs_hz / fs).limit_denominator(MAX_RESAMPLE_FACTOR)
+        up, down = frac.numerator, frac.denominator
+        if up < 1 or up > MAX_RESAMPLE_FACTOR or down > MAX_RESAMPLE_FACTOR \
+                or abs(fs * up / down - self.fs_hz) > 1e-3 * self.fs_hz:
+            raise EcgInputError(f"cannot resample {fs:g} Hz to {self.fs_hz:g} Hz with up/down factors of at most "
+                                f"{MAX_RESAMPLE_FACTOR}")
+        return up, down
+
+    def _resample(self, x: np.ndarray, fs: float, notes: list[QualityNote]) -> np.ndarray:
+        ratio = self._ratio(fs)
+        if ratio is None:
             return x
         from scipy.signal import resample_poly
-        frac = Fraction(self.fs_hz / fs).limit_denominator(1000)
-        up, down = frac.numerator, frac.denominator
-        if abs(fs * up / down - self.fs_hz) > 1e-3 * self.fs_hz:
-            raise EcgInputError(f"cannot resample {fs:g} Hz to {self.fs_hz:g} Hz with a rational ratio")
+        up, down = ratio
         y = resample_poly(x, up, down, axis=1).astype(np.float32)
         notes.append(QualityNote("resampled", f"resampled from {fs:g} Hz to {self.fs_hz:g} Hz (polyphase {up}/{down})"))
         if fs < self.fs_hz:
@@ -317,18 +335,20 @@ class EcgDeepModel:
                                      "upsampling adds no information", "warning"))
         return y
 
-    def _fit_length(self, x: np.ndarray, length_policy: str, notes: list[QualityNote]) -> tuple[np.ndarray, dict]:
+    def _fit_length(self, x: np.ndarray, length_policy: str, notes: list[QualityNote],
+                    n_orig: int | None = None) -> tuple[np.ndarray, dict]:
+        """n_orig: the record's full length at the model rate when preprocess() already cropped it (for notes)."""
         n, rec, fs = x.shape[1], self.record, self.fs_hz
         info = {"padded_samples": 0, "cropped_samples": 0}
-        if n == rec:
+        if n == rec and n_orig is None:
             return x, info
         if length_policy == "strict":
             raise EcgInputError(f"expected {rec} samples ({rec / fs:g} s at {fs:g} Hz) after resampling, got {n}")
-        if n > rec:
-            off = (n - rec) // 2
-            info["cropped_samples"] = n - rec
-            notes.append(QualityNote("cropped", f"record was {n / fs:.2f} s; used the central {rec / fs:g} s "
-                                     f"({n - rec} samples dropped)"))
+        if n >= rec:
+            off, n_full = (n - rec) // 2, max(n, n_orig or 0)
+            info["cropped_samples"] = n_full - rec
+            notes.append(QualityNote("cropped", f"record was {n_full / fs:.2f} s; used the central {rec / fs:g} s "
+                                     f"({n_full - rec} samples dropped)"))
             return x[:, off:off + rec], info
         if n < self.crop:
             raise EcgInputError(f"record is {n / fs:.2f} s; at least {self.crop / fs:g} s (one window) is required, "
@@ -387,9 +407,25 @@ class EcgDeepModel:
             raise EcgInputError("fs_hz must be a number") from None
         if not math.isfinite(fs) or fs <= 0:
             raise EcgInputError("fs_hz must be a positive finite number")
+        if not MIN_FS_HZ <= fs <= MAX_FS_HZ:
+            raise EcgInputError(f"fs_hz must be between {MIN_FS_HZ:g} and {MAX_FS_HZ:g} Hz, got {fs:g}")
+        self._ratio(fs)                          # refuse an unusable rate before any work on the samples
         scale = _UNIT_SCALE.get(str(unit).strip().upper())
         if scale is None:
             raise EcgInputError(f"unsupported unit {unit!r} (use mV, uV or V)")
+        n_in = int(x.shape[1])
+        if x.shape[0] > MAX_INPUT_ROWS:
+            raise EcgInputError(f"ecg has {x.shape[0]} rows; at most {MAX_INPUT_ROWS} leads are accepted")
+        if n_in > math.floor(MAX_INPUT_SECONDS * fs):
+            raise EcgInputError(f"record is {n_in / fs:.1f} s; at most {MAX_INPUT_SECONDS:g} s is accepted")
+        n_orig = None
+        if length_policy != "strict":            # crop to what the model needs (+1 s each side for the resampling
+            margin = math.ceil(fs)               # filter) before copying, scanning or resampling anything
+            need = math.ceil(self.record * fs / self.fs_hz) + 2 * margin
+            if n_in > need:
+                off = (n_in - need) // 2
+                x = x[:, off:off + need]         # a view, no copy
+                n_orig = int(round(n_in * self.fs_hz / fs))
         x = x.astype(np.float64)
         bad = ~np.isfinite(x)
         if bad.any():
@@ -399,12 +435,11 @@ class EcgDeepModel:
             notes.append(QualityNote("draft_model", f"model {self.manifest.get('model_id')} has status "
                                      f"{self.model_status()}, not an active registry release"))
         x, lead_status = self._order_leads(x, leads, notes)
-        n_in = x.shape[1]
         x = (x * scale).astype(np.float32)
         self._quality(x, notes)                  # on the real input signal, before resampling and padding
         x = self._resample(x, fs, notes)
         n_rs = x.shape[1]
-        x, len_info = self._fit_length(x, length_policy, notes)
+        x, len_info = self._fit_length(x, length_policy, notes, n_orig)
         n_real = min(n_rs, self.record)
         x = ((x - self.mean[:, None]) / self.std[:, None]).astype(np.float32)
         last = (n_real if length_policy == "valid" else x.shape[1]) - self.crop

@@ -48,8 +48,9 @@ out.to_dict()
 | Values | NaN or inf is an error. Nothing is filled in silently. |
 | Leads | With `leads=None`, the row count must equal `len(input.leads)`, and the order is assumed (note `lead_order_assumed`). With names, they are matched case-insensitively (`aVR` = `AVR` = `avr`, and `DI`/`DII`/`DIII` = `I`/`II`/`III`). Rows are reordered to the model's order (note `leads_reordered`). Extra leads are dropped (note `extra_leads_ignored`). A missing or duplicate lead, or a name count that differs from the row count, is an error. |
 | Quality | These checks run on the input before resampling: flat leads (SD below 5 µV), amplitude above 10 mV (usually wrong units), and clipping (more than 2% of samples exactly at a lead's max or min). Each gives a `warning` note; none of them blocks the prediction. |
-| Rate | If `fs_hz` differs from `input.fs_hz` (100 Hz), the record is resampled with `scipy.signal.resample_poly` (note `resampled`). Upsampling also adds a warning. |
-| Length | The model expects `record_samples` (10 s). The default `length_policy="pad_crop"` handles other lengths as follows. A longer record is cropped to the central 10 s (note `cropped`). A shorter one is padded at the end with a flat line at each lead's training mean (warning `padded`). Anything shorter than one window (2.5 s) is an error. `length_policy="valid"` scores a short record on the windows inside the real signal only (warning `short_record`). `"strict"` makes any other length an error. |
+| Bounds | `fs_hz` outside 50-1000 Hz, a record longer than 60 s, or more than 64 rows is an error, checked before any copy or scan of the samples. |
+| Rate | If `fs_hz` differs from `input.fs_hz` (100 Hz), the record is resampled with `scipy.signal.resample_poly` (note `resampled`). The polyphase up and down factors must both be at most 100, or the rate is refused. Upsampling also adds a warning. |
+| Length | The model expects `record_samples` (10 s). The default `length_policy="pad_crop"` handles other lengths as follows. A longer record is cropped to the central 10 s (note `cropped`); it is first cut to the central 10 s plus 1 s each side before resampling, so the work does not grow with the input length. A shorter one is padded at the end with a flat line at each lead's training mean (warning `padded`). Anything shorter than one window (2.5 s) is an error. `length_policy="valid"` scores a short record on the windows inside the real signal only (warning `short_record`). `"strict"` makes any other length an error. |
 | Normalization | Per lead, `(x - mean) / std`, using the train-fold statistics from the manifest. |
 | Windows | Windows of `crop` samples (2.5 s), with a stride of `window_stride_samples` (1.25 s) over the 10 s, give 7 windows. All of them go through the model in one batch. |
 | Output | The sigmoid of each window's logits, averaged over the windows, gives one probability per class. |
@@ -79,7 +80,7 @@ Errors and notes never contain waveform values, only counts, lead names and dura
 
 ## How the API calls it
 
-The wiring belongs to a later branch; `evade/api/app.py` is not changed here. The plan:
+The wiring belongs to a later branch; `evade/api/app.py` is not changed here. **The actual API wiring is `POST /v1/predict/ecg-deep` on branch `api-model-stubs`** (router in `evade/api/deep_models.py`, documented in `evade/api/README_deep_models.md`). It already returns placeholder outputs in the final schema until an `ecg_deep` model folder appears. When the branches merge, fold this adapter's preprocessing into that router rather than adding a second ECG path: the sha256-verified loading, lead matching and reordering, unit scaling, the input bounds (50-1000 Hz, up/down factors of at most 100, 60 s, 64 rows), polyphase resampling, the pad/crop length policies, the quality notes, and the train-fold z-score with the 7-window sigmoid mean. Keep the router's request schema and its stricter 9.5-10.5 s window. Two names need reconciling: the router reads per-class `output.thresholds`, while this adapter reads `output.operating_points`. The plan below predates that branch and is kept for reference.
 
 - **Startup.** If `EVADE_MODEL_DIR/ecg_deep/manifest.json` exists, build one `EcgDeepModel` and keep it in `STATE.models["ecg_deep"]`. A `ModelIntegrityError` or `ModelLoadError` is logged by its message only; the API then starts without the model, and `/health` lists it as not loaded. The object is read-only after loading, so request threads can share it. Set `intra_op_threads` to suit the host.
 - **`POST /v1/predict/ecg`.** This uses the existing `EcgRequest.window`, which carries `channels`, `samples`, `fs_hz` and `unit`. The call is:
@@ -106,7 +107,8 @@ The wiring belongs to a later branch; `evade/api/app.py` is not changed here. Th
 - TorchScript parity;
 - refusal on a sha256 mismatch for each listed file, a missing file, an unsafe name, or a pinned manifest mismatch;
 - the wrong-lead-count, missing-lead and duplicate-lead errors, aliases and reordering;
-- resampling from 500 Hz;
+- resampling from 500 Hz, and that cropping a long record before resampling gives the same model input;
+- the input bounds: 49.9 and 1000.1 Hz refused, 50 and 1000 Hz accepted, a rate needing a factor above 100 refused, 60 s accepted and one sample more refused, more than 64 rows refused;
 - the pad, crop, valid and strict length policies;
 - NaN refusal and the quality notes, unit scaling, and operating-point flags;
 - that importing the module pulls in no fastapi, torch or onnxruntime.
