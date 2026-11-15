@@ -22,6 +22,7 @@ FIELDS: dict[str, tuple[str, float, float]] = {
     "sw_density_cm3": ("solar wind proton density, cm-3", 0.0, 1000.0),
     "bz_gsm_nt": ("IMF Bz in GSM, nT", -500.0, 500.0),
     "dose_rate_usv_h": ("measured onboard dose-equivalent rate, microSv h-1", 0.0, 1e6),
+    "proton_satellite": ("GOES satellite number of the proton values (selects the background correction)", 1.0, 99.0),
 }
 
 

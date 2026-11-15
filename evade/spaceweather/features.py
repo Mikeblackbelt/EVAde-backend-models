@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .background import correct_hourly
 from .schema import Observations
 
 LOOKBACK_H = 48          # features use at most the last 48 hours (the NOAA 3-day feeds cover it)
@@ -47,10 +48,38 @@ def to_hourly(df: pd.DataFrame, end: pd.Timestamp | None = None) -> pd.DataFrame
     g = lambda s, how: getattr(s.dropna().resample("1h"), how)()
     out = pd.DataFrame({"p10": g(col("proton_10mev_pfu"), "mean"), "p50": g(col("proton_50mev_pfu"), "mean"),
                         "p100": g(col("proton_100mev_pfu"), "mean"), "xmax": g(col("xray_long_wm2"), "max"),
-                        "xmean": g(col("xray_long_wm2"), "mean")})
+                        "xmean": g(col("xray_long_wm2"), "mean"), "sat": g(col("proton_satellite"), "last")})
     start = df.index.min().floor("1h")
     stop = (end if end is not None else df.index.max()).floor("1h")
     return out.reindex(pd.date_range(start, stop, freq="1h", tz="UTC"))
+
+
+CME_WINDOW_H = 72
+CME_WIDE_DEG = 120.0
+CME_FEATURES = ["cme_max_speed72", "cme_wide72", "cme_wide_speed72"]
+
+
+def cme_frame(index: pd.DatetimeIndex, cmes: pd.DataFrame | None) -> pd.DataFrame:
+    """CME features per hour from a CME list (columns t = time the CME is known, speed_kms, width_deg).
+
+    cmes None = no CME source (features NaN); an empty frame = source available, no CMEs (features 0).
+    Training uses the SOHO/LASCO CDAW catalogue; serving uses NASA DONKI analyses (width = 2 x halfAngle)."""
+    f = pd.DataFrame(index=index, columns=CME_FEATURES, dtype=float)
+    if cmes is None:
+        return f
+    c = cmes.dropna(subset=["t", "speed_kms"]).copy()
+    if len(index) == 0:
+        return f
+    c["h"] = pd.to_datetime(c["t"], utc=True).dt.floor("1h")
+    c = c[(c["h"] >= index.min() - pd.Timedelta(hours=CME_WINDOW_H)) & (c["h"] <= index.max())]
+    wide = c["width_deg"].fillna(0) >= CME_WIDE_DEG
+    grid = pd.date_range(index.min() - pd.Timedelta(hours=CME_WINDOW_H), index.max(), freq="1h", tz="UTC")
+    sp = c.groupby("h")["speed_kms"].max().reindex(grid).fillna(0.0)
+    wsp = c[wide].groupby("h")["speed_kms"].max().reindex(grid).fillna(0.0)
+    f["cme_max_speed72"] = sp.rolling(CME_WINDOW_H, min_periods=1).max().reindex(index)
+    f["cme_wide_speed72"] = wsp.rolling(CME_WINDOW_H, min_periods=1).max().reindex(index)
+    f["cme_wide72"] = (f["cme_wide_speed72"] > 0).astype(float)
+    return f
 
 
 def feature_frame(h: pd.DataFrame) -> pd.DataFrame:
@@ -102,8 +131,12 @@ def onset_times(h: pd.DataFrame, quiet_gap_h: int = 24) -> list[pd.Timestamp]:
     return out
 
 
-def latest_features(obs: Observations, now: pd.Timestamp | None = None) -> tuple[dict | None, dict]:
-    """Features at the most recent complete-enough hour of an Observations object, plus coverage diagnostics."""
+def latest_features(obs: Observations, now: pd.Timestamp | None = None, table: dict | None = None,
+                    cmes: pd.DataFrame | None = None) -> tuple[dict | None, dict]:
+    """Features at the most recent complete-enough hour of an Observations object, plus coverage diagnostics.
+
+    table: background-correction table (background.py); None = no correction. cmes: CME list for the CME features
+    (None = not available, features NaN)."""
     df = records_frame(obs)
     if df.empty or "proton_10mev_pfu" not in df.columns:
         return None, {"reason": "no proton data"}
@@ -118,10 +151,14 @@ def latest_features(obs: Observations, now: pd.Timestamp | None = None) -> tuple
         return None, {"reason": "no proton data in the last 48 h"}
     h = to_hourly(df, end=end)
     h = h.iloc[-(LOOKBACK_H + 1):]
-    f = feature_frame(h)
+    warn = []
+    if table is not None:
+        h, warn = correct_hourly(h, table, obs.meta.get("background_prefix", ""))
+    f = feature_frame(h).join(cme_frame(h.index, cmes))
     row = f.iloc[-1]
     cov = {"hours": int(len(h)), "proton_hours": int(h["p10"].notna().sum()), "xray_hours": int(h["xmax"].notna().sum()),
-           "feature_hour_utc": h.index[-1].isoformat()}
+           "feature_hour_utc": h.index[-1].isoformat(), "background_corrected": table is not None,
+           "cme_source": cmes is not None, "warnings": warn}
     if not np.isfinite(row["lp10"]):
         return None, {**cov, "reason": "no >=10 MeV proton value in the latest hour"}
     return {k: (float(v) if np.isfinite(v) else None) for k, v in row.items()}, cov

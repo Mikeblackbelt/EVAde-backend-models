@@ -155,14 +155,32 @@ class SpaceWeatherObs(BaseModel):
     sw_density_cm3: float | None = Field(None, ge=0, le=1000)
     bz_gsm_nt: float | None = Field(None, ge=-500, le=500)
     dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
+    proton_satellite: int | None = Field(None, ge=1, le=99, description="GOES number of the proton values")
 
     @field_validator("t_utc")
     @classmethod
     def check_time(cls, v):
-        v = _not_future(v)
-        if v < datetime.now(timezone.utc) - timedelta(days=SPACEWX_MAX_AGE_DAYS):
-            raise ValueError(f"t_utc older than {SPACEWX_MAX_AGE_DAYS} days")
-        return v
+        return _recent(v)
+
+
+def _recent(v: datetime) -> datetime:
+    v = _not_future(v)
+    if v < datetime.now(timezone.utc) - timedelta(days=SPACEWX_MAX_AGE_DAYS):
+        raise ValueError(f"t_utc older than {SPACEWX_MAX_AGE_DAYS} days")
+    return v
+
+
+class CmeIn(BaseModel):
+    """One CME (as DONKI gives it): time it was observed, speed and angular half-width."""
+    t_utc: datetime
+    speed_kms: float = Field(ge=0, le=5000)
+    half_angle_deg: float | None = Field(None, ge=0, le=180)
+    earth_directed: bool | None = None
+
+    @field_validator("t_utc")
+    @classmethod
+    def check_time(cls, v):
+        return _recent(v)
 
 
 class SpaceWeatherRequest(BaseModel):
@@ -174,6 +192,8 @@ class SpaceWeatherRequest(BaseModel):
     cumulative_dose_msv: float | None = Field(None, ge=0, le=5000)
     measured_dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
     seu_count_last_hour: int = Field(0, ge=0)
+    include_donki: bool = Field(True, description="with provider: also fetch NASA DONKI events (CMEs feed the forecast)")
+    cmes: list[CmeIn] | None = Field(None, max_length=200, description="with observations: recent CMEs (optional)")
 
     @model_validator(mode="after")
     def _one_source(self):

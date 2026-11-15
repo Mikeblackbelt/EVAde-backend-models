@@ -92,6 +92,7 @@ def test_noaa_adapter_normalizes_all_feeds():
     assert obs.latest("sw_speed_kms")[1] == pytest.approx(512.3) and obs.latest("bz_gsm_nt")[1] == -7.5
     assert obs.warnings == []
     assert not any("1 MeV" in k for r in obs.records for k in r.values)      # unmapped channels dropped
+    assert obs.latest("proton_satellite")[1] == 18 and obs.meta["background_prefix"] == "swpc:"
 
 
 def test_noaa_adapter_optional_feeds_warn_and_protons_required():
@@ -478,3 +479,184 @@ def test_api_with_loaded_model(tmp_path, monkeypatch):
     fc = r.json()["data"]["forecast"]
     assert fc["status"] == "ok" and r.json()["model_ids"] == ["EVA-8"] and "draft model output" in r.json()["warnings"]
     assert C.get("/v1/models", headers=H).json()["data"]["models"][0]["task"] in ("spaceweather", "seizure", "ecg")
+
+
+# ---------------- v2: background correction, CME features, DONKI, GOES-R archive ----------------
+from evade.spaceweather import background as BG  # noqa: E402
+from evade.spaceweather.features import CME_FEATURES, cme_frame  # noqa: E402
+
+TABLE = {"reference": "15", "satellites": {"15": {"p10": 0.2, "p50": 0.05, "p100": 0.02},
+                                           "18": {"p10": 0.3, "p50": 0.2, "p100": 0.15},
+                                           "swpc:18": {"p10": 0.25, "p50": 0.18, "p100": 0.17}}}
+
+
+def hourly(vals, sat):
+    idx = pd.date_range("2024-01-01", periods=len(vals), freq="1h", tz="UTC")
+    return pd.DataFrame({"p10": vals, "p50": [v / 2 for v in vals], "p100": [v / 4 for v in vals], "sat": sat}, index=idx)
+
+
+def test_background_maps_floor_to_reference_and_keeps_events():
+    h = hourly([0.3, 1000.0], 18.0)
+    h["p50"], h["p100"] = [0.2, 500.0], [0.15, 250.0]
+    c, warn = BG.correct_hourly(h, TABLE)
+    assert c["p10"].iloc[0] == pytest.approx(0.2) and c["p100"].iloc[0] == pytest.approx(0.02)
+    assert c["p10"].iloc[1] == pytest.approx(1000.0 - 0.1) and warn == []
+    c2, _ = BG.correct_hourly(h, TABLE, prefix="swpc:")
+    assert c2["p100"].iloc[0] == pytest.approx(0.002)                  # floored at 0.1 x reference
+    u, warn = BG.correct_hourly(hourly([0.3], 99.0), TABLE)
+    assert u["p10"].iloc[0] == pytest.approx(0.3) and "99" in warn[0]
+    n, warn = BG.correct_hourly(hourly([0.3], np.nan), TABLE)
+    assert n["p10"].iloc[0] == pytest.approx(0.3) and warn
+
+
+def test_background_estimate_and_overlap_agreement():
+    rng = np.random.default_rng(0)
+    n = 24 * 40
+    base = np.exp(rng.normal(0, 0.05, n))
+    a = hourly(list(0.2 * base), 15.0)
+    b = hourly(list(0.6 * base), 18.0)
+    for df in (a, b):
+        df["p50"], df["p100"] = df["p10"] / 4, df["p10"] / 10
+    tab = BG.estimate({"15": a.drop(columns="sat"), "18": b.drop(columns="sat")})
+    assert tab["satellites"]["18"]["p10"] == pytest.approx(0.6, rel=0.1)
+    before = BG.overlap_agreement(a, b, None, "15", "18")["p10"]["quiet_median_abs_log10_ratio"]
+    after = BG.overlap_agreement(a, b, tab, "15", "18")["p10"]["quiet_median_abs_log10_ratio"]
+    assert before == pytest.approx(np.log10(3), abs=0.02) and after < 0.1
+
+
+def test_cme_features():
+    idx = pd.date_range("2024-05-01", periods=100, freq="1h", tz="UTC")
+    c = pd.DataFrame({"t": [idx[10], idx[20]], "speed_kms": [900.0, 1500.0], "width_deg": [60.0, 360.0]})
+    f = cme_frame(idx, c)
+    assert f["cme_max_speed72"].iloc[9] == 0 and f["cme_max_speed72"].iloc[10] == 900
+    assert f["cme_max_speed72"].iloc[25] == 1500 and f["cme_wide72"].iloc[25] == 1 and f["cme_wide_speed72"].iloc[25] == 1500
+    assert f["cme_wide72"].iloc[15] == 0
+    assert f["cme_max_speed72"].iloc[20 + 72] == 0                      # out of the 72 h window
+    assert cme_frame(idx, None)[CME_FEATURES].isna().all().all()
+    assert (cme_frame(idx, c.iloc[0:0])[CME_FEATURES] == 0).all().all()
+
+
+def donki_rows(t0):
+    return {
+        "CME": [{"activityID": "c1", "startTime": iso(t0), "cmeAnalyses": [
+            {"speed": 700, "halfAngle": 20, "isMostAccurate": False},
+            {"speed": 1400, "halfAngle": 70, "latitude": 5, "longitude": -10, "isMostAccurate": True,
+             "enlilList": [{"estimatedShockArrivalTime": iso(t0 + timedelta(days=2)), "isEarthGB": False}]}]},
+            {"activityID": "c2", "startTime": iso(t0), "cmeAnalyses": None}, {"bad": 1}],
+        "FLR": [{"flrID": "f1", "beginTime": iso(t0), "peakTime": iso(t0 + timedelta(minutes=10)), "classType": "X1.2"}],
+        "SEP": [{"sepID": "s1", "eventTime": iso(t0 + timedelta(hours=2))}],
+        "IPS": [{"activityID": "i1", "eventTime": iso(t0), "location": "Earth"}],
+        "GST": [{"gstID": "g1", "startTime": iso(t0), "allKpIndex": [{"kpIndex": 6.33}, {"kpIndex": 7.0}]}],
+    }
+
+
+def test_parse_donki():
+    rows = donki_rows(NOW - timedelta(hours=5))
+    c = P.parse_donki("CME", rows["CME"])
+    assert c[0]["speed_kms"] == 1400 and c[0]["width_deg"] == 140 and c[0]["earth_directed"] is True
+    assert c[1]["speed_kms"] is None and len(c) == 2                    # malformed row skipped
+    assert P.parse_donki("FLR", rows["FLR"])[0]["class"] == "X1.2"
+    assert P.parse_donki("GST", rows["GST"])[0]["kp_max"] == 7.0
+
+
+def test_donki_falls_back_to_api_nasa_with_env_key(monkeypatch):
+    monkeypatch.setenv("NASA_API_KEY", "test-key-123")
+    rows = donki_rows(NOW - timedelta(hours=5))
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if "kauai.ccmc" in url:
+            raise P.ProviderUnavailable("timeout")
+        return rows[url.split("/DONKI/")[1].split("?")[0]]
+    obs = P.DonkiProvider(fetch_json=fetch).fetch(96)
+    assert sum("kauai" in u for u in calls) == 1                        # CCMC tried once, then skipped
+    assert all("api_key=test-key-123" in u for u in calls if "api.nasa.gov" in u)
+    assert "test-key-123" not in json.dumps(obs.meta) and obs.meta["key"] == "NASA_API_KEY"
+    s = SW.donki_summary(obs.meta["events"])
+    assert s["cme_fastest_72h_kms"] == 1400 and s["cme_earth_directed_72h"] and s["ips_at_earth_48h"]
+    assert s["flares_m_or_x_72h"][0]["class"] == "X1.2" and s["sep_reported_72h"] and s["gst_kp_max_72h"] == 7.0
+
+    def down(url):
+        raise P.ProviderUnavailable("down")
+    with pytest.raises(P.ProviderUnavailable):
+        P.DonkiProvider(fetch_json=down).fetch(96)
+    monkeypatch.delenv("NASA_API_KEY")
+    calls.clear()
+    P.DonkiProvider(fetch_json=fetch).fetch(96)
+    assert any("api_key=DEMO_KEY" in u for u in calls)
+
+
+def test_integral_from_differential_pro_rata():
+    from evade.spaceweather.archive import integral_from_differential
+    lo, hi = np.array([5e3, 8e3, 15e3, 40e3]), np.array([8e3, 15e3, 40e3, 80e3])
+    j = np.array([[1.0, 2.0, 0.1, 0.01]])
+    p11 = np.array([0.05])
+    v = integral_from_differential(j, lo, hi, p11, 10e3)
+    assert v[0] == pytest.approx(2.0 * 5e3 + 0.1 * 25e3 + 0.01 * 40e3 + 0.05)
+    j2 = j.copy()
+    j2[0, 3] = np.nan
+    assert np.isnan(integral_from_differential(j2, lo, hi, p11, 10e3)[0])
+
+
+def test_read_cdaw(tmp_path):
+    from evade.spaceweather.archive import read_cdaw
+    f = tmp_path / "univ_all.txt"
+    f.write_text(" ===== SOHO/LASCO CME CATALOG =====\n Date Time ...\n\n"
+                 "2017/09/10  16:00:07   Halo    360   3163    3289   3037   3620    -51.4*   -------  -------  -999   \n"
+                 "2017/09/09  23:12:05    263     40    401     380    422    500      4.4    -------  -------   265   \n"
+                 "2017/09/09  23:30:05    263     40   ----    ----   ----   ----     ----    -------  -------   265   \n")
+    d = read_cdaw(f)
+    assert len(d) == 2 and d["halo"].iloc[0] and d["width_deg"].iloc[0] == 360 and d["speed_kms"].iloc[1] == 401
+
+
+def test_forecast_uses_background_and_cmes(tmp_path):
+    from sklearn.linear_model import LogisticRegression
+    import joblib
+    feats = FEATURES + CME_FEATURES
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(300, len(feats)))
+    y = (X[:, -1] > 0.5).astype(int)
+    d = tmp_path / "spaceweather"
+    d.mkdir()
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import make_pipeline
+    est = make_pipeline(SimpleImputer(strategy="median"), LogisticRegression()).fit(X, y)
+    joblib.dump({"estimator": est, "platt": None, "background": TABLE}, d / "model.joblib")
+    (d / "feature_names.json").write_text(json.dumps(feats))
+    (d / "manifest.json").write_text(json.dumps({"model_id": "EVA-X", "sha256": {"model.joblib": SW.sha256(d / "model.joblib")}}))
+    art = SW.load_forecaster(tmp_path)
+    obs = synthetic_hourly_obs(hours=80, event_at=1000)
+    fc = SW.forecast(art, obs, {"spe_in_progress": False})
+    assert fc["status"] == "ok" and any("CME" in w for w in fc["warnings"]) and fc["coverage"]["background_corrected"]
+    cm = pd.DataFrame({"t": [obs.records[-1].t - timedelta(hours=3)], "speed_kms": [2000.0], "width_deg": [360.0]})
+    fc2 = SW.forecast(art, obs, {"spe_in_progress": False}, cmes=cm)
+    assert fc2["status"] == "ok" and not any("CME" in w for w in fc2["warnings"])
+    assert fc2["p_onset_24h"] != fc["p_onset_24h"]
+
+
+def test_api_donki_context_and_failure():
+    uid = new_user()
+    quiet = series_obs([0.4] * 40, None, [0.2] * 40, xl=[1e-6] * 40, source="fake")
+    P.register("noaa_swpc", P.StaticProvider(quiet, "noaa_swpc"))
+    ev = Observations("donki", [], meta={"events": {"cme": P.parse_donki("CME", donki_rows(NOW - timedelta(hours=5))["CME"]),
+                                                    "ips": []}, "donki_sources": {"CME": "ccmc"}})
+    P.register("donki", P.StaticProvider(ev, "donki"))
+    r = C.post("/v1/predict/space-weather", headers=H, json={"user_id": uid, "provider": "noaa_swpc"})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["donki"]["summary"]["cme_fastest_72h_kms"] == 1400
+
+    class Down(P.SpaceWeatherProvider):
+        name = "donki"
+
+        def fetch(self, hours=96):
+            raise P.ProviderUnavailable("timeout")
+    P.register("donki", Down())
+    r = C.post("/v1/predict/space-weather", headers=H, json={"user_id": uid, "provider": "noaa_swpc"})
+    assert r.status_code == 200 and any("DONKI unavailable" in w for w in r.json()["warnings"])
+    assert r.json()["data"]["donki"]["summary"] is None
+    r = C.post("/v1/predict/space-weather", headers=H, json={
+        "user_id": uid, "observations": obs_payload([0.4] * 10),
+        "cmes": [{"t_utc": (NOW - timedelta(hours=2)).isoformat(), "speed_kms": 1800, "half_angle_deg": 90}]})
+    assert r.status_code == 200 and r.json()["data"]["donki"]["source"] == "request"
+    assert r.json()["data"]["donki"]["summary"]["cme_fastest_72h_kms"] == 1800

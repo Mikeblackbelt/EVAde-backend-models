@@ -1,0 +1,9 @@
+{
+ "reference": "15",
+ "percentile": 25,
+ "note": "placeholder; replaced by values estimated in training",
+ "satellites": {
+  "15": {"p10": 0.22, "p50": 0.06, "p100": 0.025},
+  "swpc:18": {"p10": 0.20, "p50": 0.18, "p100": 0.17}
+ }
+}

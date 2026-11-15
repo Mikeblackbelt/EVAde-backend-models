@@ -1,14 +1,14 @@
-"""Train and evaluate the SPE onset forecast (EVA-7 arch, EVA-8 model) on historical GOES data.
+"""Train the SPE onset forecast, version 2 (EVA-9 GOES-only; EVA-10/EVA-11 GOES + CME), on GOES 1998-2026.
 
-Data: NOAA NCEI GOES 5-min integral protons and XRS averages (scripts/download_goes_history.sh), 1998-2019.
+Data: NOAA NCEI GOES-8..15 5-min averages (CSV, 1998-2020-03) and GOES-16/18 SGPS + XRS L2 (netCDF, 2020-11 on),
+the SOHO/LASCO CDAW CME catalogue (historical stand-in for DONKI CMEs), per-satellite background correction.
 Task: at each quiet hour (>=10 MeV hourly flux below 10 pfu), will the hourly flux reach 10 pfu within 24 h?
-Protocol A (headline, time-forward): train 1998-2010, Platt recalibration 2011-2012, test 2013-2019, 72 h embargo
-around every boundary (48 h feature lookback + 24 h label horizon) so no storm straddles a split.
-Model selection (logistic vs gradient boosting) uses blocked CV inside the pre-test period only.
-Protocol B (robustness): leave-one-block-out over all years with the same embargo, pooled out-of-fold metrics.
-Baselines: climatology (training base rate) and persistence (logistic on the current log flux only).
+Split (proof of concept, one split): train 1998-2016, test 2017 onward with a 72 h embargo at the boundary;
+results overall, for the GOES-15 era (2017-2020-03) and the GOES-R era (2020-11 on). Logistic regression, no
+recalibration step. Baselines: persistence (current log flux only) and climatology (training base rate).
 
-Run:  python -I -m evade.spaceweather.train --raw ~/evade_data/other/spaceweather/raw --out <model_dir> [--smoke]
+Run:  python -I -c "import sys; sys.path.insert(0, '<code>'); from evade.spaceweather.train import main; main()" \
+        --raw <goes csv root> --goesr <goes-r root> --cdaw <univ_all.txt> --out <model_dir> [--smoke]
 """
 from __future__ import annotations
 
@@ -23,12 +23,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .features import FEATURES, LOOKBACK_H, HORIZON_H, feature_frame, labels, onset_times, to_hourly
-from .model import ARCH_ID, MODEL_ID, TASK, sha256
+from . import background as BG
+from .features import (CME_FEATURES, FEATURES, HORIZON_H, LOOKBACK_H, cme_frame, feature_frame, labels, onset_times,
+                       to_hourly)
+from .model import TASK, sha256
 
 XRS_UNSCALE = {"long": 0.7, "short": 0.85}   # SWPC scaling on GOES-8..15 XRS; divide to get true irradiance
 EMBARGO_H = LOOKBACK_H + HORIZON_H
 BOOT_BLOCK_DAYS = 27                          # one solar rotation
+CME_LAG_H = 3                                 # assume a CME is known 3 h after its first coronagraph image
+GOESR_SWITCH = "2023-01-01"                   # GOES-16 protons/X-rays before, GOES-18 after
+OVERLAP = ("2022-09-01", "2023-01-01")        # GOES-16 / GOES-18 overlap kept back for validating the correction
 
 
 # ---------------- parsing (files are untrusted text; parsed as CSV only) ----------------
@@ -95,6 +100,7 @@ def build_hourly(raw: Path, years: tuple[int, int]) -> tuple[pd.DataFrame, dict]
         if not pfiles:
             continue
         hp = to_hourly(parse_goes_csv(pfiles[0]))[["p10", "p50", "p100"]]
+        hp["sat"] = float(pfiles[0].name[1:3])                  # g08_..., g15_... -> 8, 15
         xs = []
         for xf in xfiles:
             try:
@@ -117,7 +123,57 @@ def build_hourly(raw: Path, years: tuple[int, int]) -> tuple[pd.DataFrame, dict]
     return h, prov
 
 
-# ---------------- models ----------------
+# ---------------- GOES-R ----------------
+def build_goesr_sat(root: Path, sat: int, first: str | None = None, last: str | None = None) -> pd.DataFrame:
+    """Hourly table for one GOES-R satellite: SGPS integral protons (integrated from differential) and XRS."""
+    from .archive import read_sgps_day, read_xrs_year
+    parts = []
+    for f in sorted((root / "sgps" / f"g{sat}").glob("*/*/*.nc")):
+        day = f.name.split("_d")[1][:8]
+        if (first and day < first.replace("-", "")) or (last and day >= last.replace("-", "")):
+            continue
+        try:
+            parts.append(read_sgps_day(f))
+        except Exception as e:                              # a bad daily file is skipped, not fatal
+            print(f"skip {f.name}: {type(e).__name__}", flush=True)
+    xr = []
+    for f in sorted((root / "xrs" / f"g{sat}").glob("*.nc")):
+        try:
+            xr.append(read_xrs_year(f))
+        except Exception as e:
+            print(f"skip {f.name}: {type(e).__name__}", flush=True)
+    if not parts:
+        return pd.DataFrame(columns=["p10", "p50", "p100", "xmax", "xmean", "sat"])
+    p = pd.concat(parts).sort_index()
+    hp = to_hourly(p[~p.index.duplicated()])[["p10", "p50", "p100"]]
+    if xr:
+        x = pd.concat(xr).sort_index()
+        x = x[(x.index >= hp.index.min()) & (x.index < hp.index.max() + pd.Timedelta(hours=1))]
+        hx = to_hourly(x[~x.index.duplicated()])[["xmax", "xmean"]]
+        hp = hp.join(hx, how="left")
+    else:
+        hp = hp.assign(xmax=np.nan, xmean=np.nan)
+    hp["sat"] = float(sat)
+    return hp
+
+
+def combine_goesr(g16: pd.DataFrame, g18: pd.DataFrame) -> pd.DataFrame:
+    """GOES-16 before GOESR_SWITCH, GOES-18 after; gaps filled from the other satellite (with its own `sat`)."""
+    if not len(g16) or not len(g18):
+        return g16 if len(g16) else g18
+    sw = pd.Timestamp(GOESR_SWITCH, tz="UTC")
+    primary = pd.concat([g16[g16.index < sw], g18[g18.index >= sw]])
+    backup = pd.concat([g18[g18.index < sw], g16[g16.index >= sw]])
+    idx = primary.index.union(backup.index)
+    primary, backup = primary.reindex(idx), backup.reindex(idx)
+    gap = primary["p10"].isna() & backup["p10"].notna()
+    primary.loc[gap, ["p10", "p50", "p100", "sat"]] = backup.loc[gap, ["p10", "p50", "p100", "sat"]]
+    xgap = primary["xmax"].isna()
+    primary.loc[xgap, ["xmax", "xmean"]] = backup.loc[xgap, ["xmax", "xmean"]]
+    return primary
+
+
+# ---------------- models and metrics ----------------
 def make_lr():
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
@@ -126,49 +182,22 @@ def make_lr():
     return make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), LogisticRegression(C=1.0, max_iter=5000))
 
 
-def make_hgb():
-    from sklearn.ensemble import HistGradientBoostingClassifier
-    return HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=200,
-                                          l2_regularization=1.0, early_stopping=False, random_state=0)
-
-
 def make_persistence():
     from sklearn.linear_model import LogisticRegression
     return LogisticRegression(max_iter=1000)
 
 
-MAKERS = {"logistic": make_lr, "hgb": make_hgb}
-
-
-def logit(p):
-    p = np.clip(p, 1e-6, 1 - 1e-6)
-    return np.log(p / (1 - p))
-
-
-def fit_platt(p, y) -> list[float]:
-    from sklearn.linear_model import LogisticRegression
-    m = LogisticRegression(C=1e6, max_iter=1000).fit(logit(p)[:, None], y)
-    return [float(m.coef_[0, 0]), float(m.intercept_[0])]
-
-
-def apply_platt(p, ab):
-    return 1 / (1 + np.exp(-(ab[0] * logit(p) + ab[1])))
-
-
-# ---------------- metrics ----------------
-def metrics(y, p, clim: float) -> dict:
-    from sklearn.metrics import average_precision_score, roc_auc_score
+def metrics(y, p) -> dict:
+    from sklearn.metrics import roc_auc_score
     y, p = np.asarray(y), np.asarray(p)
-    b = float(np.mean((p - y) ** 2))
-    bc = float(np.mean((clim - y) ** 2))
     two = len(np.unique(y)) == 2
-    return {"n": int(len(y)), "positives": int(y.sum()), "brier": round(b, 5), "brier_climatology": round(bc, 5),
-            "bss": round(1 - b / bc, 4) if bc > 0 else None,
+    return {"n": int(len(y)), "positives": int(y.sum()), "brier": round(float(np.mean((p - y) ** 2)), 5),
             "auroc": round(float(roc_auc_score(y, p)), 4) if two else None,
-            "ap": round(float(average_precision_score(y, p)), 4) if two else None}
+            "mean_p": round(float(p.mean()), 4) if len(p) else None,
+            "base_rate": round(float(y.mean()), 4) if len(y) else None}
 
 
-def reliability(y, p, edges=(0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0001)) -> list[dict]:
+def reliability(y, p, edges=(0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0001)) -> list[dict]:
     y, p = np.asarray(y), np.asarray(p)
     out = []
     for lo, hi in zip(edges, edges[1:]):
@@ -179,198 +208,200 @@ def reliability(y, p, edges=(0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.000
     return out
 
 
-def block_bootstrap(t: pd.DatetimeIndex, y, preds: dict, clim: float, reps: int = 500, seed: int = 0) -> dict:
-    """95% CIs from resampling 27-day blocks (keeps each storm's hours together), incl. model-minus-baseline Brier."""
+def diff_ci(t: pd.DatetimeIndex, y, pa, pb, reps: int = 300, seed: int = 0) -> dict:
+    """95% CI of (b - a) for Brier and AUROC, resampling 27-day blocks (keeps each storm's hours together)."""
     from sklearn.metrics import roc_auc_score
     rng = np.random.default_rng(seed)
-    y = np.asarray(y)
+    y, pa, pb = np.asarray(y), np.asarray(pa), np.asarray(pb)
     blk = ((t - t.min()) / pd.Timedelta(days=BOOT_BLOCK_DAYS)).astype(int).to_numpy()
     ub = np.unique(blk)
     idx = {b: np.flatnonzero(blk == b) for b in ub}
-    acc = {k: {"brier": [], "auroc": [], "bss": []} for k in preds}
-    acc["diff_brier_model_minus_persistence"] = {"v": []}
+    db, da = [], []
     for _ in range(reps):
         ii = np.concatenate([idx[b] for b in rng.choice(ub, size=len(ub), replace=True)])
-        yy = y[ii]
-        bc = np.mean((clim - yy) ** 2)
-        br = {}
-        for k, p in preds.items():
-            pp = np.asarray(p)[ii]
-            br[k] = np.mean((pp - yy) ** 2)
-            acc[k]["brier"].append(br[k])
-            acc[k]["bss"].append(1 - br[k] / bc if bc > 0 else np.nan)
-            if len(np.unique(yy)) == 2:
-                acc[k]["auroc"].append(roc_auc_score(yy, pp))
-        if "model" in br and "persistence" in br:
-            acc["diff_brier_model_minus_persistence"]["v"].append(br["model"] - br["persistence"])
-    ci = lambda v: [round(float(np.nanpercentile(v, 2.5)), 5), round(float(np.nanpercentile(v, 97.5)), 5)] if len(v) else None
-    return {k: {m: ci(v) for m, v in d.items()} for k, d in acc.items()} | {"reps": reps, "block_days": BOOT_BLOCK_DAYS}
+        db.append(np.mean((pb[ii] - y[ii]) ** 2) - np.mean((pa[ii] - y[ii]) ** 2))
+        if len(np.unique(y[ii])) == 2:
+            da.append(roc_auc_score(y[ii], pb[ii]) - roc_auc_score(y[ii], pa[ii]))
+    q = lambda v: [round(float(np.percentile(v, 2.5)), 5), round(float(np.percentile(v, 97.5)), 5)] if v else None
+    return {"brier_b_minus_a": q(db), "auroc_b_minus_a": q(da), "reps": reps, "block_days": BOOT_BLOCK_DAYS}
 
 
-def thresholds_table(t, y, p, onsets, thr=(0.1, 0.25, 0.5)) -> list[dict]:
-    """Hourly hit and false-alarm rates, plus the share of independent onsets with p >= thr in the prior 24 h."""
-    y, p = np.asarray(y), np.asarray(p)
-    s = pd.Series(p, index=t)
-    rows = []
-    for th in thr:
-        hit = p >= th
-        tp, fp = int((hit & (y == 1)).sum()), int((hit & (y == 0)).sum())
-        ev = [bool((s[(s.index >= o - pd.Timedelta(hours=HORIZON_H)) & (s.index < o)] >= th).any()) for o in onsets]
-        quiet_days = max((y == 0).sum() / 24, 1)
-        rows.append({"threshold": th, "hourly_tpr": round(tp / max(int(y.sum()), 1), 3),
-                     "hourly_fpr": round(fp / max(int((y == 0).sum()), 1), 4), "precision": round(tp / max(tp + fp, 1), 3),
-                     "onsets_warned": f"{sum(ev)}/{len(ev)}", "false_alarm_hours_per_quiet_day": round(fp / quiet_days, 3)})
-    return rows
-
-
-# ---------------- splits ----------------
 def embargo(t: pd.DatetimeIndex, boundaries: list[pd.Timestamp], hours: int = EMBARGO_H) -> np.ndarray:
-    """True where a sample is at least `hours` away from every boundary."""
     keep = np.ones(len(t), bool)
     for b in boundaries:
         keep &= np.abs((t - b) / pd.Timedelta(hours=1)) >= hours
     return keep
 
 
-def equal_blocks(t0: pd.Timestamp, t1: pd.Timestamp, k: int) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    edges = pd.date_range(t0, t1, periods=k + 1)
-    return list(zip(edges[:-1], edges[1:]))
-
-
-def blocked_oof(D: pd.DataFrame, make, blocks, cols) -> np.ndarray:
-    """Leave-one-block-out predictions; training rows within the embargo of the held-out block are dropped."""
-    t = D.index
-    oof = np.full(len(D), np.nan)
-    for i, (a, b) in enumerate(blocks):
-        last = i == len(blocks) - 1
-        te = (t >= a) & ((t <= b) if last else (t < b))
-        tr = ~te & embargo(t, [a, b])
-        if te.sum() == 0 or D["y"][tr].nunique() < 2:
-            continue
-        m = make().fit(D.loc[tr, cols].to_numpy(float), D["y"][tr].to_numpy())
-        oof[te] = m.predict_proba(D.loc[te, cols].to_numpy(float))[:, 1]
-    return oof
+def live_swpc_background(hours: int = 168) -> dict | None:
+    """Quiet floor of the live SWPC operational integral feed (7 days), for the 'swpc:<sat>' table entries."""
+    from .features import records_frame
+    from .providers import NoaaSwpcProvider
+    try:
+        obs = NoaaSwpcProvider().fetch(hours)
+    except Exception as e:
+        print(f"live SWPC background skipped: {type(e).__name__}", flush=True)
+        return None
+    h = to_hourly(records_frame(obs))
+    sats = h["sat"].dropna()
+    if not len(sats):
+        return None
+    sat = str(int(sats.mode().iloc[0]))
+    e = BG.estimate({sat: h})["satellites"][sat]
+    e["estimated_from"] = [str(h.index.min()), str(h.index.max())]
+    return {f"swpc:{sat}": e, "_hourly": h}
 
 
 # ---------------- main ----------------
 def run(a) -> dict:
     t_start = time.time()
-    raw = Path(a.raw).expanduser()
-    h, prov = build_hourly(raw, (a.first_year, a.last_year))
-    print(f"hourly rows {len(h)}  {h.index.min()} .. {h.index.max()}  p10 valid {h['p10'].notna().mean():.3f} "
-          f"xray valid {h['xmax'].notna().mean():.3f}", flush=True)
-    F, L = feature_frame(h), labels(h)
-    D = F.join(L)
-    D = D[D["eligible"]].drop(columns="eligible")
+    raw, goesr = Path(a.raw).expanduser(), Path(a.goesr).expanduser()
+    h_old, prov = build_hourly(raw, (a.first_year, a.last_year))
+    g16 = build_goesr_sat(goesr, 16, a.goesr_first, a.goesr_last)
+    g18 = build_goesr_sat(goesr, 18, a.goesr_first, a.goesr_last)
+    print(f"old {len(h_old)} h; g16 {len(g16)} h; g18 {len(g18)} h", flush=True)
+
+    # per-satellite background, the GOES-16/18 overlap held out for validation
+    by_sat = {str(int(s)): g.drop(columns="sat") for s, g in h_old.groupby("sat")}
+    for s, g in (("16", g16), ("18", g18)):
+        if len(g):
+            by_sat[s] = g
+    table = BG.estimate(by_sat, exclude=[OVERLAP])
+    check = {}
+    live = live_swpc_background() if a.swpc_live else None
+    if live:
+        h_live = live.pop("_hourly")
+        table["satellites"].update(live)
+        if len(g18):         # our archive integration vs the SWPC operational integral for GOES-18, common hours
+            j = h_live[["p10", "p50", "p100"]].join(g18[["p10", "p50", "p100"]].add_suffix("_ncei"), how="inner").dropna()
+            check["swpc_vs_ncei_integration_g18"] = {
+                "hours": int(len(j)),
+                **{c: round(float((np.log10(j[c].clip(lower=1e-4)) - np.log10(j[f"{c}_ncei"].clip(lower=1e-4))).median()), 3)
+                   if len(j) else None for c in ("p10", "p50", "p100")},
+                "note": "median log10(SWPC / NCEI-integrated); 0 = identical"}
+    table["note"] = "estimated by evade.spaceweather.train; quiet = hourly >=10 MeV < 10 pfu, no S1 within 72 h"
+    agree = {}
+    if len(g16) and len(g18):
+        w = lambda g: g[(g.index >= pd.Timestamp(OVERLAP[0], tz="UTC")) & (g.index < pd.Timestamp(OVERLAP[1], tz="UTC"))]
+        agree["g16_vs_g18_2022_09_12"] = {"before": BG.overlap_agreement(w(g16), w(g18), None, "16", "18"),
+                                          "after": BG.overlap_agreement(w(g16), w(g18), table, "16", "18")}
+    print("background", json.dumps(table["satellites"]), json.dumps(agree), json.dumps(check), flush=True)
+
+    gr = combine_goesr(g16, g18) if (len(g16) or len(g18)) else pd.DataFrame()
+    h = pd.concat([h_old, gr]).sort_index() if len(gr) else h_old
+    h = h[~h.index.duplicated(keep="first")]
+    h = h.reindex(pd.date_range(h.index.min(), h.index.max(), freq="1h", tz="UTC"))
+    hc, _ = BG.correct_hourly(h, table)
+
+    from .archive import read_cdaw
+    cd = read_cdaw(Path(a.cdaw).expanduser())
+    cd["t"] = cd["t"] + pd.Timedelta(hours=CME_LAG_H)
+    F = feature_frame(hc).join(cme_frame(h.index, cd))
+    F_raw = feature_frame(h)                                   # same features without background correction
+    L = labels(h)                                              # labels on the satellite's own flux
+    ok = L["eligible"].to_numpy()
+    D, Draw, y_all = F[ok], F_raw[ok], L["y"][ok]
     t = D.index
-    onsets_all = onset_times(h)
-    train_end, calib_end = pd.Timestamp(a.train_end, tz="UTC"), pd.Timestamp(a.calib_end, tz="UTC")
-    t0, t1 = h.index.min(), h.index.max()
-    print(f"eligible quiet hours {len(D)}, positives {int(D['y'].sum())}, onsets {len(onsets_all)}", flush=True)
+    split = pd.Timestamp(a.split, tz="UTC")
+    keep = embargo(t, [split])
+    tr, te = keep & (t < split), keep & (t >= split)
+    ytr, yte = y_all[tr].to_numpy(), y_all[te].to_numpy()
+    onsets = onset_times(h)
+    print(f"eligible {len(D)}, train {tr.sum()} (pos {ytr.sum()}), test {te.sum()} (pos {yte.sum()}), "
+          f"onsets {len(onsets)}", flush=True)
 
-    # model selection: blocked CV inside the pre-test period
-    pre = D[t < calib_end]
-    sel_blocks = equal_blocks(pre.index.min(), pre.index.max(), a.sel_blocks)
-    sel = {}
-    for name, mk in MAKERS.items():
-        oof = blocked_oof(pre, mk, sel_blocks, FEATURES)
-        ok = ~np.isnan(oof)
-        sel[name] = metrics(pre["y"][ok], oof[ok], float(pre["y"].mean()))
-        print(f"selection CV {name}: {sel[name]}", flush=True)
-    chosen = min(sel, key=lambda k: sel[k]["brier"])
-
-    # protocol A: time-forward
-    keep = embargo(t, [train_end, calib_end])
-    tr, ca, te = keep & (t < train_end), keep & (t >= train_end) & (t < calib_end), keep & (t >= calib_end)
-    Xtr, ytr = D.loc[tr, FEATURES].to_numpy(float), D["y"][tr].to_numpy()
-    est = MAKERS[chosen]().fit(Xtr, ytr)
-    p_ca = est.predict_proba(D.loc[ca, FEATURES].to_numpy(float))[:, 1]
-    platt = fit_platt(p_ca, D["y"][ca].to_numpy()) if D["y"][ca].nunique() == 2 else None
-    raw_te = est.predict_proba(D.loc[te, FEATURES].to_numpy(float))[:, 1]
-    p_te = apply_platt(raw_te, platt) if platt else raw_te
+    cols = {"goes_bgcorr": FEATURES, "goes_cme_bgcorr": FEATURES + CME_FEATURES}
+    models, preds = {}, {}
+    for name, c in cols.items():
+        models[name] = make_lr().fit(D.loc[tr, c].to_numpy(float), ytr)
+        preds[name] = models[name].predict_proba(D.loc[te, c].to_numpy(float))[:, 1]
+    m_raw = make_lr().fit(Draw.loc[tr, FEATURES].to_numpy(float), ytr)
+    preds["goes_no_bgcorr"] = m_raw.predict_proba(Draw.loc[te, FEATURES].to_numpy(float))[:, 1]
     pers = make_persistence().fit(D.loc[tr, ["lp10"]].to_numpy(float), ytr)
-    pers_te = pers.predict_proba(D.loc[te, ["lp10"]].to_numpy(float))[:, 1]
-    clim = float(ytr.mean())
-    yte, tte = D["y"][te].to_numpy(), t[te]
-    onsets_te = [o for o in onsets_all if o >= calib_end + pd.Timedelta(hours=EMBARGO_H)]
-    A = {"split": {"train": [str(t0), str(train_end)], "calibration": [str(train_end), str(calib_end)],
-                   "test": [str(calib_end), str(t1)], "embargo_hours": EMBARGO_H,
-                   "n_train": int(tr.sum()), "n_calibration": int(ca.sum()), "n_test": int(te.sum()),
-                   "independent_onsets": {"train": sum(o < train_end for o in onsets_all),
-                                          "calibration": sum(train_end <= o < calib_end for o in onsets_all),
-                                          "test": len(onsets_te)}},
-         "model": metrics(yte, p_te, clim), "model_uncalibrated": metrics(yte, raw_te, clim),
-         "persistence": metrics(yte, pers_te, clim), "climatology": metrics(yte, np.full(len(yte), clim), clim),
-         "reliability_model": reliability(yte, p_te), "reliability_persistence": reliability(yte, pers_te),
-         "thresholds_model": thresholds_table(tte, yte, p_te, onsets_te),
-         "thresholds_persistence": thresholds_table(tte, yte, pers_te, onsets_te)}
-    A["bootstrap_ci95"] = block_bootstrap(tte, yte, {"model": p_te, "persistence": pers_te}, clim, reps=a.boot)
-    print(f"protocol A test: model {A['model']} | persistence {A['persistence']}", flush=True)
+    preds["persistence"] = pers.predict_proba(D.loc[te, ["lp10"]].to_numpy(float))[:, 1]
+    preds["climatology"] = np.full(int(te.sum()), float(ytr.mean()))
 
-    # protocol B: leave-one-block-out over all data with the chosen model type
-    blocks = equal_blocks(D.index.min(), D.index.max(), a.cv_blocks)
-    oof = blocked_oof(D, MAKERS[chosen], blocks, FEATURES)
-    oof_p = blocked_oof(D, make_persistence, blocks, ["lp10"])
-    ok = ~np.isnan(oof) & ~np.isnan(oof_p)
-    clim_b = np.full(len(D), np.nan)
-    for i, (b0, b1) in enumerate(blocks):
-        te_b = (t >= b0) & ((t <= b1) if i == len(blocks) - 1 else (t < b1))
-        tr_b = ~te_b & embargo(t, [b0, b1])
-        clim_b[te_b] = D["y"][tr_b].mean()
-    B = {"blocks": [[str(x), str(y)] for x, y in blocks], "embargo_hours": EMBARGO_H,
-         "model": metrics(D["y"][ok], oof[ok], float(D["y"].mean())),
-         "persistence": metrics(D["y"][ok], oof_p[ok], float(D["y"].mean())),
-         "climatology_per_fold": metrics(D["y"][ok], clim_b[ok], float(D["y"].mean())),
-         "note": "pooled out-of-fold, no Platt step; BSS here is against the pooled base rate"}
-    print(f"protocol B: model {B['model']} | persistence {B['persistence']}", flush=True)
+    tte = t[te]
+    goesr_start = gr.index.min() if len(gr) else pd.Timestamp("2100-01-01", tz="UTC")
+    eras = {"test_all": np.ones(len(tte), bool), "goes15_era": np.asarray(tte < goesr_start),
+            "goesr_era": np.asarray(tte >= goesr_start)}
+    first_ok = split + pd.Timedelta(hours=EMBARGO_H)
+    in_era = {"test_all": lambda o: True, "goes15_era": lambda o: o < goesr_start, "goesr_era": lambda o: o >= goesr_start}
+    table_m = {}
+    for era, msk in eras.items():
+        table_m[era] = {"onsets": int(sum(o >= first_ok and in_era[era](o) for o in onsets)),
+                        **{k: metrics(yte[msk], p[msk]) for k, p in preds.items()}}
+    gm = eras["goesr_era"]
+    rel = {"test_all_goes_bgcorr": reliability(yte, preds["goes_bgcorr"]),
+           "goesr_era_goes_bgcorr": reliability(yte[gm], preds["goes_bgcorr"][gm]) if gm.any() else None,
+           "goesr_era_goes_cme_bgcorr": reliability(yte[gm], preds["goes_cme_bgcorr"][gm]) if gm.any() else None}
+    cme_ci = {"test_all": diff_ci(tte, yte, preds["goes_bgcorr"], preds["goes_cme_bgcorr"], reps=a.boot)}
+    if gm.sum() > 100 and yte[gm].sum() > 0:
+        cme_ci["goesr_era"] = diff_ci(tte[gm], yte[gm], preds["goes_bgcorr"][gm], preds["goes_cme_bgcorr"][gm],
+                                      reps=a.boot)
+    for era, d in table_m.items():
+        print(era, json.dumps({k: (v if not isinstance(v, dict) else {kk: v[kk] for kk in ("brier", "auroc")})
+                               for k, v in d.items()}), flush=True)
+    print("cme_minus_goes_ci", json.dumps(cme_ci), flush=True)
 
+    # pre-stated serving rule: the CME model is served only if the CI shows a Brier gain on the whole test period
+    ci_b = cme_ci["test_all"]["brier_b_minus_a"]
+    served = "goes_cme_bgcorr" if ci_b and ci_b[1] < 0 else "goes_bgcorr"
+    ids = dict(zip(("goes_bgcorr", "cme_arch", "goes_cme_bgcorr"), a.ids.split(",")))
     out = Path(a.out).expanduser() / "spaceweather"
     out.mkdir(parents=True, exist_ok=True)
     import joblib
     import sklearn
-    joblib.dump({"estimator": est, "platt": platt}, out / "model.joblib")   # our own artifact; load only what you built
-    (out / "feature_names.json").write_text(json.dumps(FEATURES))
-    data_version = pd.util.hash_pandas_object(h.round(12), index=True).sum()
-    m = {"task": TASK, "model_id": MODEL_ID, "arch_id": ARCH_ID, "chosen_model": chosen, "selection_cv": sel,
-         "selection_blocks": [[str(x), str(y)] for x, y in sel_blocks], "protocol_a_time_forward": A,
-         "protocol_b_blocked_cv": B, "climatology_rate": round(clim, 5), "platt": platt,
+    joblib.dump({"estimator": models[served], "platt": None, "background": table}, out / "model.joblib")  # own artifact
+    (out / "feature_names.json").write_text(json.dumps(cols[served]))
+    (out / "background.json").write_text(json.dumps(table, indent=1))
+    m = {"task": TASK, "model_id": ids[served], "served": served, "ids": ids, "split": a.split,
+         "test_range": [str(split), str(h.index.max())], "goesr_start": str(goesr_start),
+         "metrics": table_m, "reliability": rel, "cme_minus_goes_ci95": cme_ci, "background": table,
+         "background_agreement": agree, "integration_check": check, "climatology_rate": round(float(ytr.mean()), 5),
          "label": "hourly mean >=10 MeV flux reaches 10 pfu in any of the next 24 h; samples: hours below 10 pfu now",
-         "data": {"source": "NOAA NCEI GOES SEM 5-min averages (EPS/EPEAD integral protons, XRS)", "rows_hourly": len(h),
-                  "range": [str(t0), str(t1)], "hourly_table_hash": str(int(data_version) & ((1 << 64) - 1)),
-                  "months": len(prov), "xrs_unscaled_by": XRS_UNSCALE},
+         "data": {"goes_csv_months": len(prov), "hourly_rows": len(h), "range": [str(h.index.min()), str(h.index.max())],
+                  "cdaw_cmes": len(cd), "cme_lag_hours": CME_LAG_H, "goesr_switch": GOESR_SWITCH},
+         "serving_note": f"draft model {ids[served]} trained on GOES-8..15 1998-2016, tested 2017 on incl. GOES-R; "
+                         "a probability for review, not a warning service",
          "runtime_s": round(time.time() - t_start, 1), "smoke": bool(a.smoke)}
     (out / "metrics.json").write_text(json.dumps(m, indent=1, default=str))
     (out / "provenance.json").write_text(json.dumps(prov, indent=0))
-    man = {"task": TASK, "model_id": MODEL_ID, "arch_id": ARCH_ID, "status": "draft", "format": "joblib",
-           "contents": "dict(estimator=sklearn %s, platt=[a, b] or None)" % chosen, "version": "0.1.0",
-           "feature_count": len(FEATURES), "training_data_range": {"train": A["split"]["train"],
-                                                                  "calibration": A["split"]["calibration"],
-                                                                  "test_held_out": A["split"]["test"]},
+    man = {"task": TASK, "model_id": ids[served], "arch_id": "EVA-7" if served == "goes_bgcorr" else ids["cme_arch"],
+           "status": "draft", "format": "joblib",
+           "contents": "dict(estimator=sklearn logistic pipeline, platt=None, background=table)", "version": "0.2.0",
+           "feature_count": len(cols[served]),
+           "training_data_range": {"train": [str(h.index.min()), str(split)], "test_held_out": m["test_range"]},
            "created_utc": datetime.now(timezone.utc).isoformat(), "git_commit": a.commit,
            "python": platform.python_version(), "sklearn": sklearn.__version__, "numpy": np.__version__,
-           "sha256": {f: sha256(out / f) for f in ("model.joblib", "feature_names.json", "metrics.json")}}
+           "sha256": {f: sha256(out / f) for f in ("model.joblib", "feature_names.json", "metrics.json", "background.json")}}
     (out / "manifest.json").write_text(json.dumps(man, indent=1))
-    print(f"wrote {out}", flush=True)
+    print(f"served {served} as {ids[served]}; wrote {out}", flush=True)
     return m
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--raw", required=True)
+    p.add_argument("--goesr", required=True)
+    p.add_argument("--cdaw", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--first-year", type=int, default=1998)
-    p.add_argument("--last-year", type=int, default=2019)
-    p.add_argument("--train-end", default="2011-01-01")
-    p.add_argument("--calib-end", default="2013-01-01")
-    p.add_argument("--sel-blocks", type=int, default=5)
-    p.add_argument("--cv-blocks", type=int, default=9)
-    p.add_argument("--boot", type=int, default=500)
+    p.add_argument("--last-year", type=int, default=2020)
+    p.add_argument("--goesr-first", default=None)
+    p.add_argument("--goesr-last", default=None)
+    p.add_argument("--split", default="2017-01-01")
+    p.add_argument("--boot", type=int, default=300)
+    p.add_argument("--ids", default="EVA-9,EVA-10,EVA-11", help="GOES-only model, CME arch, CME model")
+    p.add_argument("--swpc-live", action="store_true", help="estimate the live SWPC feed background (network)")
     p.add_argument("--commit", default=None)
-    p.add_argument("--smoke", action="store_true", help="one year (2003), quarter splits, few bootstrap reps")
+    p.add_argument("--smoke", action="store_true", help="2003 plus a few GOES-R months, few bootstrap reps")
     a = p.parse_args(argv)
     if a.smoke:
         a.first_year = a.last_year = 2003
-        a.train_end, a.calib_end, a.sel_blocks, a.cv_blocks, a.boot = "2003-08-01", "2003-10-01", 3, 3, 20
+        a.goesr_first = a.goesr_first or "2021-06-01"
+        a.goesr_last = a.goesr_last or "2021-10-01"
+        a.split, a.boot = "2003-10-01", 20
     run(a)
     return 0
 

@@ -260,8 +260,28 @@ def predict_proba(art: dict, row: dict) -> float:
     return p
 
 
-def forecast(art: dict | None, obs: Observations, now_cast: dict) -> dict:
-    from .features import latest_features
+def donki_summary(events: dict | None, now: datetime | None = None) -> dict | None:
+    """Context from DONKI events for the response (display only, except CMEs, which also feed the forecast)."""
+    if events is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    since = lambda h: (now - timedelta(hours=h)).isoformat()
+    fl = [e for e in events.get("flr", []) if e["t_utc"] >= since(72) and str(e.get("class") or "")[:1] in ("M", "X")]
+    cm = [e for e in events.get("cme", []) if e["t_utc"] >= since(72)]
+    return {"flares_m_or_x_72h": [{"t_utc": e["t_utc"], "class": e.get("class")} for e in fl],
+            "cme_count_72h": len(cm),
+            "cme_fastest_72h_kms": max([e["speed_kms"] for e in cm if e.get("speed_kms")], default=None),
+            "cme_earth_directed_72h": any(e.get("earth_directed") for e in cm) if cm else False,
+            "ips_at_earth_48h": any(e["t_utc"] >= since(48) and (e.get("location") or "").lower() == "earth"
+                                    for e in events.get("ips", [])),
+            "sep_reported_72h": any(e["t_utc"] >= since(72) for e in events.get("sep", [])),
+            "gst_kp_max_72h": max([e["kp_max"] for e in events.get("gst", []) if e["t_utc"] >= since(72)
+                                   and e.get("kp_max") is not None], default=None),
+            "feeds": sorted(events)}
+
+
+def forecast(art: dict | None, obs: Observations, now_cast: dict, cmes=None) -> dict:
+    from .features import CME_FEATURES, latest_features
     out = {"task": "P(>=10 MeV proton flux reaches 10 pfu (S1) within 24 h), given it is below 10 pfu now",
            "p_onset_24h": None, "model_id": None}
     if now_cast.get("spe_in_progress"):
@@ -269,16 +289,18 @@ def forecast(art: dict | None, obs: Observations, now_cast: dict) -> dict:
     if art is None:
         return {**out, "status": "model_not_loaded", "reason": "no forecast model in EVADE_MODEL_DIR/spaceweather "
                                                                "(or EVADE_ALLOW_DRAFT is not 1)"}
-    row, cov = latest_features(obs)
+    row, cov = latest_features(obs, table=art["model"].get("background"), cmes=cmes)
     if row is None:
         return {**out, "status": "insufficient_data", "reason": cov.get("reason"), "coverage": cov}
     p = predict_proba(art, row)
     m = art.get("metrics", {})
-    warn = []
+    warn = list(cov.pop("warnings", []))
+    if set(CME_FEATURES) & set(art["features"]) and cmes is None:
+        warn.append("no CME source (DONKI unavailable): CME features imputed")
     if cov["xray_hours"] == 0:
         warn.append("no X-ray data: forecast uses imputed X-ray features")
     if cov["proton_hours"] < 24:
         warn.append(f"only {cov['proton_hours']} h of proton history (model uses 48 h)")
     return {**out, "status": "ok", "p_onset_24h": round(p, 4), "model_id": art["model_id"], "model_status": art["status"],
             "climatology": m.get("climatology_rate"), "coverage": cov, "warnings": warn,
-            "note": "draft model trained on GOES-8 to GOES-15 (1998-2019); a probability for review, not a warning service"}
+            "note": m.get("serving_note", "draft model; a probability for review, not a warning service")}

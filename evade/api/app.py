@@ -35,7 +35,7 @@ from ..preprocessing.signal import make_windows, signal_quality
 from ..risk.engine import DomainInput, mdtr, radiation_domain, risk
 from ..spaceweather import model as SW
 from ..spaceweather.model import load_forecaster
-from ..spaceweather.providers import ProviderUnavailable, get_provider
+from ..spaceweather.providers import ProviderUnavailable, cmes_frame, get_provider
 from ..spaceweather.schema import Observations, Record
 from ..training.features import EEG_BANDS, ecg_features, spectral_features
 from . import schemas as S
@@ -287,10 +287,11 @@ def headline(task: str, m: dict) -> dict:
     if task == "ecg":
         return {"macro_auroc_test_fold": m["hgb"]["macro_auroc"], "ci95": m["hgb"]["macro_auroc_ci95"]}
     if task == "spaceweather":
-        a = m.get("protocol_a_time_forward", {})
-        return {"test_brier": a.get("model", {}).get("brier"), "test_bss": a.get("model", {}).get("bss"),
-                "test_auroc": a.get("model", {}).get("auroc"), "persistence_brier": a.get("persistence", {}).get("brier"),
-                "test_range": a.get("split", {}).get("test")}
+        mm, s = m.get("metrics", {}), m.get("served")
+        pick = lambda era, k: {x: mm.get(era, {}).get(k, {}).get(x) for x in ("brier", "auroc")}
+        return {"test_range": m.get("test_range"), "test_all": pick("test_all", s),
+                "test_all_persistence": pick("test_all", "persistence"), "goesr_era": pick("goesr_era", s),
+                "goesr_era_persistence": pick("goesr_era", "persistence")}
     return {}
 
 
@@ -498,11 +499,24 @@ def predict_space_weather(body: S.SpaceWeatherRequest):
             raise err(503, "provider_unavailable", f"space-weather provider '{body.provider}' unavailable: {e}", "provider")
     if not obs.has("proton_10mev_pfu"):
         raise err(422, "validation_error", "observations need at least one proton_10mev_pfu value", "observations")
+    events, donki_warn, donki_src = None, [], None
+    if body.observations is not None and body.cmes is not None:
+        events = {"cme": [{"t_utc": c.t_utc.isoformat(), "speed_kms": c.speed_kms, "half_angle_deg": c.half_angle_deg,
+                           "width_deg": 2 * c.half_angle_deg if c.half_angle_deg is not None else None,
+                           "earth_directed": c.earth_directed} for c in body.cmes]}
+        donki_src = "request"
+    elif body.provider is not None and body.include_donki:
+        try:
+            d = get_provider("donki").fetch(96)
+            events, donki_warn, donki_src = d.meta.get("events"), d.warnings, d.meta.get("donki_sources")
+        except ProviderUnavailable as e:
+            donki_warn = [f"DONKI unavailable: {e}"]
     nc = SW.nowcast(obs)
-    fc = SW.forecast(STATE.models.get("spaceweather"), obs, nc)
+    fc = SW.forecast(STATE.models.get("spaceweather"), obs, nc, cmes=cmes_frame(events))
     dose = SW.dose_estimate(obs, body.location, body.shielding, body.measured_dose_rate_usv_h)
     rin = SW.radiation_inputs(dose, body.cumulative_dose_msv, body.seu_count_last_hour)
     data = {"nowcast": nc, "forecast": fc, "dose": dose, "radiation_inputs": rin, "o5": SW.o5_candidate(dose),
+            "donki": {"summary": SW.donki_summary(events), "source": donki_src},
             "assumptions": SW.ASSUMPTIONS,
             "source": {"name": obs.source, "fetched_at": obs.fetched_at.isoformat(), "records": len(obs.records),
                        "warnings": obs.warnings, "meta": obs.meta},
@@ -518,7 +532,7 @@ def predict_space_weather(body: S.SpaceWeatherRequest):
                                             "t_rad_days": round(max(t_rad, 0.0), 1) if t_rad is not None else None,
                                             "rule_version": "risk-score.md v2"}
     ids = [fc["model_id"]] if fc.get("model_id") else []
-    warn = nc["warnings"] + fc.get("warnings", []) + obs.warnings + (["draft model output"] if ids else [])
+    warn = nc["warnings"] + fc.get("warnings", []) + obs.warnings + donki_warn + (["draft model output"] if ids else [])
     if dose["source"] == "estimated":
         warn.append("dose rate is a model estimate from assumptions, not a measurement")
     return envelope(body.user_id, data, ids, warn)

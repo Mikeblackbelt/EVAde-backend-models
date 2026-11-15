@@ -31,7 +31,7 @@ class SpaceWeatherProvider:
 
 
 # ---------------- HTTP (allow-listed hosts, timeout, size cap) ----------------
-ALLOWED_HOSTS = {"services.swpc.noaa.gov"}
+ALLOWED_HOSTS = {"services.swpc.noaa.gov", "kauai.ccmc.gsfc.nasa.gov", "api.nasa.gov"}
 USER_AGENT = "evade-spaceweather/0.1 (research prototype)"
 
 
@@ -113,7 +113,7 @@ class NoaaSwpcProvider(SpaceWeatherProvider):
         for r in protons:
             name = self.PROTON_ENERGY.get(str(r.get("energy", "")).replace(" ", "").replace("MeV", " MeV"))
             if name and r.get("time_tag"):
-                recs.append(Record.make(r["time_tag"], **{name: r.get("flux")}))
+                recs.append(Record.make(r["time_tag"], **{name: r.get("flux"), "proton_satellite": r.get("satellite")}))
                 sats.add(r.get("satellite"))
         meta["proton_satellites"] = sorted(str(s) for s in sats if s is not None)
 
@@ -152,7 +152,103 @@ class NoaaSwpcProvider(SpaceWeatherProvider):
         recs = [r for r in recs if r.values and r.t >= since]
         if not any("proton_10mev_pfu" in r.values for r in recs):
             raise ProviderUnavailable("NOAA SWPC returned no usable >=10 MeV proton values")
+        meta["background_prefix"] = "swpc:"         # SWPC operational integral product (background.py)
         return Observations(self.name, recs, warnings=warn, meta=meta)
+
+
+# ---------------- NASA DONKI event provider ----------------
+def _num(v):
+    try:
+        x = float(v)
+        return x if x == x else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_donki(kind: str, rows: list[dict]) -> list[dict]:
+    """Normalize DONKI JSON rows of one type into small event dicts (times in UTC ISO-8601)."""
+    out = []
+    for r in rows:
+        try:
+            if kind == "CME":
+                an = r.get("cmeAnalyses") or []
+                best = next((a for a in an if a.get("isMostAccurate")), an[-1] if an else None)
+                enlil = [e for a in an for e in (a.get("enlilList") or [])]
+                earth = None
+                if enlil:
+                    earth = any(e.get("isEarthGB") or e.get("estimatedShockArrivalTime") for e in enlil)
+                half = _num(best.get("halfAngle")) if best else None
+                out.append({"t_utc": utc(r["startTime"]).isoformat(), "id": r.get("activityID"),
+                            "speed_kms": _num(best.get("speed")) if best else None, "half_angle_deg": half,
+                            "width_deg": 2 * half if half is not None else None,
+                            "latitude": _num(best.get("latitude")) if best else None,
+                            "longitude": _num(best.get("longitude")) if best else None, "earth_directed": earth})
+            elif kind == "FLR":
+                out.append({"t_utc": utc(r.get("peakTime") or r["beginTime"]).isoformat(), "id": r.get("flrID"),
+                            "class": r.get("classType")})
+            elif kind == "SEP":
+                out.append({"t_utc": utc(r["eventTime"]).isoformat(), "id": r.get("sepID")})
+            elif kind == "IPS":
+                out.append({"t_utc": utc(r["eventTime"]).isoformat(), "id": r.get("activityID"),
+                            "location": r.get("location")})
+            elif kind == "GST":
+                kps = [_num(k.get("kpIndex")) for k in (r.get("allKpIndex") or [])]
+                out.append({"t_utc": utc(r["startTime"]).isoformat(), "id": r.get("gstID"),
+                            "kp_max": max([k for k in kps if k is not None], default=None)})
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue                                     # skip malformed rows, keep the rest
+    return out
+
+
+class DonkiProvider(SpaceWeatherProvider):
+    """NASA DONKI events (CME, FLR, SEP, IPS, GST). Keyless CCMC endpoint first; if it does not answer, api.nasa.gov
+    with NASA_API_KEY (environment only, never stored), or the public DEMO_KEY (about 10 requests/hour). Returns
+    Observations with no records and the normalized events in meta["events"]."""
+    name = "donki"
+    CCMC = "https://kauai.ccmc.gsfc.nasa.gov/DONKI/WS/get"
+    NASA = "https://api.nasa.gov/DONKI"
+    TYPES = ("CME", "FLR", "SEP", "IPS", "GST")
+
+    def __init__(self, fetch_json: Callable[[str], Any] | None = None, timeout: float = 10.0):
+        self.fetch_json = fetch_json or (lambda url: http_get_json(url, timeout=timeout))
+
+    def fetch(self, hours: int = 96) -> Observations:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=min(hours, 24 * 59))           # api.nasa.gov allows at most 60 days
+        q = f"startDate={start:%Y-%m-%d}&endDate={end:%Y-%m-%d}"
+        key = os.environ.get("NASA_API_KEY") or "DEMO_KEY"
+        events, status, ccmc_ok = {}, {}, True
+        for t in self.TYPES:
+            rows = None
+            if ccmc_ok:
+                try:
+                    rows, status[t] = self.fetch_json(f"{self.CCMC}/{t}?{q}"), "ccmc"
+                except ProviderUnavailable:
+                    ccmc_ok = False                                   # do not retry CCMC for the other types
+            if rows is None:
+                try:
+                    rows, status[t] = self.fetch_json(f"{self.NASA}/{t}?{q}&api_key={key}"), "api.nasa.gov"
+                except ProviderUnavailable as e:
+                    status[t] = f"unavailable ({e})"
+                    continue
+            events[t.lower()] = parse_donki(t, rows if isinstance(rows, list) else [])
+        if not events:
+            raise ProviderUnavailable("DONKI unavailable (CCMC and api.nasa.gov)")
+        since = start.isoformat()
+        events = {k: [e for e in v if e["t_utc"] >= since] for k, v in events.items()}
+        warn = [f"DONKI {t} feed unavailable" for t, s in status.items() if s.startswith("unavailable")]
+        return Observations(self.name, [], warnings=warn,
+                            meta={"events": events, "donki_sources": status,
+                                  "key": "NASA_API_KEY" if os.environ.get("NASA_API_KEY") else "DEMO_KEY"})
+
+
+def cmes_frame(events: dict | None):
+    """DONKI (or posted) CME events -> DataFrame(t, speed_kms, width_deg) for features.cme_frame; None if no source."""
+    import pandas as pd
+    if events is None or "cme" not in events:
+        return None
+    rows = [(e["t_utc"], e.get("speed_kms"), e.get("width_deg")) for e in events["cme"]]
+    return pd.DataFrame(rows, columns=["t", "speed_kms", "width_deg"])
 
 
 # ---------------- file replay provider ----------------
@@ -256,6 +352,9 @@ def _defaults() -> None:
     with _REG_LOCK:
         if "noaa_swpc" not in _REGISTRY and os.environ.get("EVADE_SPACEWX_DISABLE_NETWORK") != "1":
             _REGISTRY["noaa_swpc"] = CachedProvider(NoaaSwpcProvider())
+        if "donki" not in _REGISTRY and os.environ.get("EVADE_SPACEWX_DISABLE_NETWORK") != "1":
+            # events change slowly and DEMO_KEY allows ~10 requests/hour: cache 1 h, failures 10 min
+            _REGISTRY["donki"] = CachedProvider(DonkiProvider(), ttl_s=3600.0, fail_ttl_s=600.0)
         f = os.environ.get("EVADE_SPACEWX_REPLAY_FILE")
         if f and "replay" not in _REGISTRY:
             _REGISTRY["replay"] = CachedProvider(FileProvider(f), ttl_s=30.0)
