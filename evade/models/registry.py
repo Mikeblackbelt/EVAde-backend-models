@@ -1,18 +1,26 @@
 """Model registry: scan EVADE_MODEL_DIR, validate manifests, verify sha256, load by format.
 
 Every folder <EVADE_MODEL_DIR>/<task>/ with a manifest.json is a candidate. A folder that fails any check is
-listed as unavailable with a reason; nothing here raises at service start. Draft models load only with
-EVADE_ALLOW_DRAFT=1. The beta folders seizure/ and ecg/ from before the manifest contract (model.joblib, no
-manifest.json) still load, with a manifest synthesized from MODEL_REGISTRY.md (EVA-2, EVA-6).
+listed as unavailable with a generic reason code (the detail goes to the log only); nothing here raises at service
+start. Draft models load only with EVADE_ALLOW_DRAFT=1. The beta folders seizure/ and ecg/ from before the manifest
+contract (model.joblib, no manifest.json) still load, with a manifest synthesized from MODEL_REGISTRY.md (EVA-2,
+EVA-6). They are verified only if EVADE_LEGACY_SHA256_SEIZURE / EVADE_LEGACY_SHA256_ECG pins the weights' sha256;
+without a pin they are served marked "unverified" (re-stamp them with evade.models.export to give them a manifest).
+
+Every file is read once: the bytes that are hashed are the bytes that are deserialized (no window between the check
+and the load), and the loaded object must look like a model (predict / predict_proba, a dict of such, an ONNX
+session or a TorchScript module).
 
 Safety: joblib and pickle files run code when loaded. EVADE_MODEL_DIR must hold only artifacts built by
-evade.training on a machine we control (or fetched from our own R2 bucket with scripts/fetch_models.py);
-the sha256 check catches corruption and accidental swaps, not a compromised source.
+evade.training on a machine we control (or fetched from our own R2 models bucket with scripts/fetch_models.py);
+the sha256 check catches corruption and accidental swaps, not a compromised source, and the type check runs after
+unpickling, so it is a sanity check, not a defence.
 """
 from __future__ import annotations
 
 import hmac
 import importlib.util
+import io
 import json
 import logging
 import os
@@ -25,6 +33,18 @@ from . import manifest as MF
 log = logging.getLogger("evade.models")
 
 RUNTIME_MODULE = {"joblib": "joblib", "onnx": "onnxruntime", "torchscript": "torch"}
+
+# generic, path-free reasons for GET /v1/models; the detailed reason is logged at scan time
+REASONS = {
+    "manifest_invalid": "manifest.json is unreadable or does not follow the contract (see evade/models/README.md)",
+    "model_id_unassigned": "model_id not assigned: add a MODEL_REGISTRY.md row and re-stamp with evade.models.export",
+    "draft_not_allowed": "draft model; set EVADE_ALLOW_DRAFT=1 to serve it",
+    "runtime_missing": "the runtime for this model format is not installed",
+    "file_missing": "a file named by the manifest is missing",
+    "sha256_mismatch": "sha256 mismatch; refusing to load",
+    "unexpected_model_type": "the file did not load as a supported model type",
+    "load_failed": "the model could not be loaded",
+}
 
 # pre-contract beta folders: task -> manifest fields that MODEL_REGISTRY.md already fixes
 LEGACY = {
@@ -43,30 +63,57 @@ LEGACY = {
 }
 
 
+class ModelLoadError(Exception):
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+
+
+def legacy_pin_var(task: str) -> str:
+    return f"EVADE_LEGACY_SHA256_{task.upper()}"
+
+
 def runtime_available(fmt: str) -> bool:
     mod = RUNTIME_MODULE.get(fmt)
     return bool(mod) and importlib.util.find_spec(mod) is not None
 
 
-def _load_joblib(path: Path) -> Any:
+def _load_joblib(data: bytes) -> Any:
     import joblib
     # joblib unpickles code: only artifacts built by evade.training on a machine we control (see module docstring)
-    return joblib.load(path)
+    return joblib.load(io.BytesIO(data))
 
 
-def _load_onnx(path: Path) -> Any:
+def _load_onnx(data: bytes) -> Any:
     import onnxruntime as ort
-    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(data, providers=["CPUExecutionProvider"])
 
 
-def _load_torchscript(path: Path) -> Any:
+def _load_torchscript(data: bytes) -> Any:
     import torch
-    m = torch.jit.load(str(path), map_location="cpu")
+    m = torch.jit.load(io.BytesIO(data), map_location="cpu")
     m.eval()
     return m
 
 
-LOADERS: dict[str, Callable[[Path], Any]] = {"joblib": _load_joblib, "onnx": _load_onnx, "torchscript": _load_torchscript}
+LOADERS: dict[str, Callable[[bytes], Any]] = {"joblib": _load_joblib, "onnx": _load_onnx,
+                                              "torchscript": _load_torchscript}
+
+
+def _is_estimator(o: Any) -> bool:
+    return callable(getattr(o, "predict_proba", None)) or callable(getattr(o, "predict", None))
+
+
+def model_type_ok(fmt: str, obj: Any) -> bool:
+    if fmt == "joblib":
+        return _is_estimator(obj) or (isinstance(obj, dict) and bool(obj) and all(_is_estimator(v) for v in obj.values()))
+    if fmt == "onnx":
+        import onnxruntime as ort
+        return isinstance(obj, ort.InferenceSession)
+    if fmt == "torchscript":
+        import torch
+        return isinstance(obj, torch.jit.ScriptModule)
+    return False
 
 
 @dataclass
@@ -75,7 +122,8 @@ class ModelEntry:
     path: Path
     manifest: dict | None = None
     available: bool = False
-    reason: str | None = None
+    reason: str | None = None            # detail for logs and tests; never returned by the API
+    reason_code: str | None = None       # generic code, returned by the API with REASONS[code]
     legacy: bool = False
     sha256_verified: bool = False
     model: Any = None
@@ -86,18 +134,18 @@ class ModelEntry:
         """The dict shape the API keeps in STATE.models[task]."""
         m = self.manifest or {}
         return {"model": self.model, "features": self.features, "metrics": self.metrics, "model_id": m.get("model_id"),
-                "status": m.get("status", "draft"), "format": m.get("format"), "manifest": m}
+                "status": m.get("status", "draft"), "format": m.get("format"), "manifest": m, "legacy": self.legacy,
+                "sha256_verified": self.sha256_verified}
 
     def public(self) -> dict:
         m = self.manifest or {}
         return {"task": self.task, "model_id": m.get("model_id"), "status": m.get("status"), "format": m.get("format"),
-                "available": self.available, "reason": self.reason, "legacy": self.legacy,
-                "sha256_verified": self.sha256_verified, "input": m.get("input"), "output": m.get("output"),
-                "code_commit": m.get("code_commit"), "trained_at": m.get("trained_at"), "data": m.get("data")}
-
-
-def _read_json(p: Path) -> Any:
-    return json.loads(p.read_text(encoding="utf-8"))
+                "available": self.available, "reason_code": self.reason_code,
+                "reason": REASONS.get(self.reason_code) if self.reason_code else None, "legacy": self.legacy,
+                "sha256_verified": self.sha256_verified,
+                "integrity": "sha256_verified" if self.sha256_verified else "unverified",
+                "input": m.get("input"), "output": m.get("output"), "code_commit": m.get("code_commit"),
+                "trained_at": m.get("trained_at"), "data": m.get("data")}
 
 
 def _inside(folder: Path, name: str) -> Path:
@@ -105,6 +153,19 @@ def _inside(folder: Path, name: str) -> Path:
     if p.parent != folder.resolve():
         raise MF.ManifestError(f"{name} resolves outside the model folder")
     return p
+
+
+def _read(folder: Path, name: str) -> bytes:
+    p = _inside(folder, name)
+    if not p.is_file():
+        raise ModelLoadError("file_missing", f"{name} missing")
+    return p.read_bytes()
+
+
+def _verify(data: bytes, digest: str, name: str) -> None:
+    if not (isinstance(digest, str) and MF.SHA_RE.match(digest)) or \
+            not hmac.compare_digest(MF.sha256_bytes(data), digest):
+        raise ModelLoadError("sha256_mismatch", f"sha256 mismatch for {name}; refusing to load")
 
 
 class ModelRegistry:
@@ -128,29 +189,36 @@ class ModelRegistry:
                 e = ModelEntry(task=d.name, path=d)
                 try:
                     self._load(e)
+                except ModelLoadError as ex:
+                    e.available, e.model, e.reason_code, e.reason = False, None, ex.code, str(ex)
+                except (MF.ManifestError, ValueError) as ex:     # includes JSON decoding errors
+                    e.available, e.model = False, None
+                    e.reason_code, e.reason = "manifest_invalid", f"{type(ex).__name__}: {ex}"
                 except Exception as ex:                  # noqa: BLE001 - one bad folder must not stop the service
                     e.available, e.model = False, None
-                    e.reason = e.reason or f"{type(ex).__name__}: {ex}"
+                    e.reason_code, e.reason = "load_failed", f"{type(ex).__name__}: {ex}"
                 if not e.available:
-                    log.warning("model folder %s unavailable: %s", d.name, e.reason)
+                    log.warning("model folder %s unavailable (%s): %s", d.name, e.reason_code, e.reason)
+                elif e.legacy and not e.sha256_verified:
+                    log.warning("model folder %s is a legacy folder without a pinned sha256 (%s): served as unverified",
+                                d.name, legacy_pin_var(d.name))
                 self.entries[d.name] = e
         return self.entries
 
     def _manifest_for(self, e: ModelEntry) -> dict:
         mp = e.path / MF.MANIFEST
         if mp.exists():
-            m = _read_json(mp)
+            m = json.loads(mp.read_bytes().decode("utf-8"))
             if isinstance(m, dict) and m.get("model_id") == MF.UNASSIGNED:
                 e.manifest = m
-                raise MF.ManifestError("model_id not assigned: add a MODEL_REGISTRY.md row, then run "
-                                       "python -m evade.models.export --dir <folder> --model-id EVA-<n>")
+                raise ModelLoadError("model_id_unassigned",
+                                     "model_id not assigned: add a MODEL_REGISTRY.md row, then run "
+                                     "python -m evade.models.export --dir <folder> --model-id EVA-<n>")
             return MF.validate(m)
-        legacy = LEGACY[e.task]
         e.legacy = True
-        w = e.path / "model.joblib"
         return {"schema_version": MF.SCHEMA_VERSION, "task": e.task, "status": "draft", "format": "joblib",
-                "weights": "model.joblib", "sha256": MF.sha256_file(w), "code_commit": "unknown (pre-manifest beta)",
-                "trained_at": None, **legacy}
+                "weights": "model.joblib", "sha256": None, "code_commit": "unknown (pre-manifest beta)",
+                "trained_at": None, **LEGACY[e.task]}
 
     def _load(self, e: ModelEntry) -> None:
         m = self._manifest_for(e)
@@ -158,35 +226,49 @@ class ModelRegistry:
         if m["task"] != e.task:
             log.warning("model folder %s has manifest task %s; served under the folder name", e.task, m["task"])
         if m["status"] == "draft" and not self.allow_draft:
-            e.reason = "draft model; set EVADE_ALLOW_DRAFT=1 to serve it"
-            return
+            raise ModelLoadError("draft_not_allowed", "draft model; set EVADE_ALLOW_DRAFT=1 to serve it")
         if not runtime_available(m["format"]):
-            e.reason = f"runtime for format {m['format']} not installed ({RUNTIME_MODULE[m['format']]})"
-            return
-        w = _inside(e.path, m["weights"])
-        if not w.is_file():
-            e.reason = f"weights file {m['weights']} missing"
-            return
-        if not e.legacy:                                   # verify every hash before anything is deserialized
-            if not hmac.compare_digest(MF.sha256_file(w), m["sha256"]):
-                e.reason = "sha256 mismatch for the weights file; refusing to load"
-                return
+            raise ModelLoadError("runtime_missing",
+                                 f"runtime for format {m['format']} not installed ({RUNTIME_MODULE[m['format']]})")
+        # read every file once; verify the bytes before anything is deserialized, then load those same bytes
+        weights = _read(e.path, m["weights"])
+        side: dict[str, bytes] = {}
+        if not e.legacy:
+            _verify(weights, m["sha256"], "the weights file")
             for name, digest in (m.get("files") or {}).items():
-                f = _inside(e.path, name)
-                if not f.is_file() or not hmac.compare_digest(MF.sha256_file(f), digest):
-                    e.reason = f"sha256 mismatch or missing file: {name}"
-                    return
+                side[name] = _read(e.path, name)
+                _verify(side[name], digest, name)
             e.sha256_verified = True
+        else:
+            pin = os.environ.get(legacy_pin_var(e.task), "").strip().lower()
+            m["sha256"] = MF.sha256_bytes(weights)
+            if pin:
+                _verify(weights, pin, f"the weights file (pinned by {legacy_pin_var(e.task)})")
+                e.sha256_verified = True
+
+        def sidecar(name: str) -> bytes | None:
+            if name in side:
+                return side[name]
+            p = _inside(e.path, name)
+            return p.read_bytes() if p.is_file() else None
+
         inp = m["input"]
         if inp.get("kind") == "features":
-            ref = inp.get("features") or ("feature_names.json" if (e.path / "feature_names.json").is_file() else None)
-            e.features = _read_json(_inside(e.path, ref)) if ref else None
+            ref = inp.get("features") or "feature_names.json"
+            raw = sidecar(ref)
+            if raw is None and inp.get("features"):
+                raise ModelLoadError("file_missing", f"{ref} missing")
+            e.features = json.loads(raw.decode("utf-8")) if raw is not None else None
         if MF.missing_recommended(m) and not e.legacy:
             log.warning("model folder %s manifest lacks %s", e.task, ", ".join(MF.missing_recommended(m)))
-        mp = e.path / "metrics.json"
-        e.metrics = _read_json(mp) if mp.is_file() else {}
-        e.model = LOADERS[m["format"]](w)
-        e.available, e.reason = True, None
+        raw = sidecar("metrics.json")
+        e.metrics = json.loads(raw.decode("utf-8")) if raw is not None else {}
+        model = LOADERS[m["format"]](weights)
+        if not model_type_ok(m["format"], model):
+            raise ModelLoadError("unexpected_model_type",
+                                 f"{m['weights']} loaded as {type(model).__name__}, not a {m['format']} model")
+        e.model = model
+        e.available, e.reason, e.reason_code = True, None, None
 
     def served(self) -> dict[str, dict]:
         return {t: e.as_served() for t, e in self.entries.items() if e.available}

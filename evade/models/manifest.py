@@ -35,6 +35,10 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def safe_name(name: object, field: str) -> str:
     """A bare file name: no directories, no traversal, no absolute paths."""
     if not isinstance(name, str) or not name or name in (".", "..") or "/" in name or "\\" in name \
