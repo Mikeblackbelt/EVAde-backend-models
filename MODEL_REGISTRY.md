@@ -2,7 +2,7 @@
 
 Every retained model architecture and trained model in this repository gets a unique identifier of the form **`EVA-[n]`**, where `n` is a positive integer assigned in order of creation. This file is the single source of truth.
 
-**Next free ID: EVA-9**
+**Next free ID: EVA-12**
 
 ## Rules
 
@@ -34,6 +34,9 @@ Every retained model architecture and trained model in this repository gets a un
 | EVA-6 | model | ptbxl-superclass-hgb beta | EVA-5 | ECG | 5 diagnostic superclasses, 12-lead 10 s | 2026-11-14 | c98e542 | PTB-XL 1.0.3 (f52b3af6) | official strat_fold: train 1-8, test 10 | macro AUROC, patient bootstrap | 0.867 (0.858-0.878) | draft | [training README](evade/training/README.md) |
 | EVA-7 | arch | spe-onset-24h | - | radiation | P(>=10 MeV protons reach 10 pfu within 24 h), quiet hours only; 19 GOES proton and X-ray history features (48 h lookback); logistic or gradient boosting chosen by blocked CV, Platt step | 2026-11-14 | a99b862 | - | - | - | - | draft | [spaceweather README](evade/spaceweather/README.md) |
 | EVA-8 | model | spe-onset-24h logistic beta | EVA-7 | radiation | SPE onset within 24 h (hourly) | 2026-11-14 | a99b862 | NOAA NCEI GOES-8..15 SEM 5-min averages 1998-2019, XRS unscaled /0.7 (hourly table hash 7998390607791038415) | time-forward: train 1998-2010, Platt 2011-2012, test 2013-2019, 72 h embargo; also 9-block leave-one-block-out | Brier, BSS, AUROC, reliability; 27-day block bootstrap; persistence and climatology baselines | test Brier 0.00594 (0.00332-0.00895), AUROC 0.918 (0.870-0.952) vs persistence 0.714; 15 test onsets; over-forecasts about 2x | draft | [spaceweather README](evade/spaceweather/README.md) |
+| EVA-9 | model | spe-onset-24h logistic v2 (GOES-R, background-corrected) | EVA-7 | radiation | SPE onset within 24 h (hourly); served | 2026-11-15 | 1fa7ec7 | NOAA NCEI GOES-8..15 CSV 1998-2020-03 + GOES-16/18 SGPS/XRS L2 2020-11..2026-11 (integral integrated from differential); per-satellite per-year quiet floors | time-forward: train 1998-2016, test 2017-01..2026-11, 72 h embargo; no recalibration | Brier and AUROC vs persistence, overall and GOES-R era; reliability | test Brier 0.0118, AUROC 0.890 (persistence 0.763); GOES-R era (37 onsets) Brier 0.0172, AUROC 0.832 (persistence 0.0169 / 0.741); over-forecasts ~1.5x | draft | [spaceweather README](evade/spaceweather/README.md) |
+| EVA-10 | arch | spe-onset-24h-cme | - | radiation | EVA-7 features plus 3 CME features (fastest CME speed in 72 h, wide-CME flag, fastest wide CME); CDAW catalogue in training, NASA DONKI when serving | 2026-11-15 | 1fa7ec7 | - | - | - | - | draft | [spaceweather README](evade/spaceweather/README.md) |
+| EVA-11 | model | spe-onset-24h-cme logistic | EVA-10 | radiation | SPE onset within 24 h (hourly); not served | 2026-11-15 | 1fa7ec7 | as EVA-9 plus SOHO/LASCO CDAW CME catalogue (3 h availability lag) | as EVA-9 | as EVA-9; 27-day block bootstrap of the difference vs EVA-9 | test Brier 0.0117, AUROC 0.892; GOES-R era AUROC +0.005 vs EVA-9 (95% CI +0.0001 to +0.012), Brier difference CI includes 0 | draft | [spaceweather README](evade/spaceweather/README.md) |
 
 ## Entry template
 
