@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from fractions import Fraction
 from typing import Callable
 
 import numpy as np
+from scipy import signal as sps
 
 from ..preprocessing import config
 from ..preprocessing.eeg import norm_bipolar_name, preprocess_eeg
@@ -28,6 +30,12 @@ SEIZURE_CHANNELS = list(config.BIPOLAR_NAMES)
 SEIZURE_FS = 250.0
 DEFAULT_ECG_THRESHOLD = 0.5
 MOCK_SEIZURE_THRESHOLDS = {"review_5pct_fpr": 0.5, "suspect_1pct_fpr": 0.8}   # placeholders, not operating points
+# ECG input bounds (as the deep-serving adapter, evade/models/onnx_ecg.py): they cap the CPU and memory one request
+# can use. The request schema is stricter still (12 leads, 9.5-10.5 s); these also bound what a manifest may ask for.
+ECG_MIN_FS, ECG_MAX_FS = 50.0, 1000.0
+ECG_MAX_RESAMPLE_FACTOR = 100         # polyphase up and down factors must both be at most this
+ECG_MAX_INPUT_SECONDS = 60.0
+ECG_MAX_INPUT_ROWS = 64
 
 Sidecar = Callable[[str], "bytes | None"]
 
@@ -102,6 +110,22 @@ def _check_out(y: np.ndarray, shape: tuple) -> None:
 
 
 # ---------------- ECG (PTB-XL superclass, multilabel) ----------------
+def ecg_resample_ratio(fs_in: float, fs_out: float) -> tuple[int, int] | None:
+    """Polyphase (up, down) for fs_in -> fs_out, both at most ECG_MAX_RESAMPLE_FACTOR; None when no resampling.
+    Raises ValueError for rates outside 50-1000 Hz or a ratio those factors cannot represent (within 0.1%)."""
+    for f in (fs_in, fs_out):
+        if not ECG_MIN_FS <= f <= ECG_MAX_FS:
+            raise ValueError(f"ECG sampling rates must be {ECG_MIN_FS:g}-{ECG_MAX_FS:g} Hz")
+    if abs(fs_in - fs_out) < 1e-6 * fs_out:
+        return None
+    frac = Fraction(fs_out / fs_in).limit_denominator(ECG_MAX_RESAMPLE_FACTOR)
+    up, down = frac.numerator, frac.denominator
+    if not (1 <= up <= ECG_MAX_RESAMPLE_FACTOR and down <= ECG_MAX_RESAMPLE_FACTOR)             or abs(fs_in * up / down - fs_out) > 1e-3 * fs_out:
+        raise ValueError(f"cannot resample {fs_in:g} Hz to {fs_out:g} Hz with up/down factors of at most "
+                         f"{ECG_MAX_RESAMPLE_FACTOR}")
+    return up, down
+
+
 class EcgAdapter:
     """Mirrors evade/training/deep/export.py: 100 Hz, 1000 samples, no band-pass, per-lead z-score with the train
     statistics from the manifest, sliding crops (tensor_shape[2] samples, window_stride_samples stride), sigmoid,
@@ -116,11 +140,13 @@ class EcgAdapter:
         if shape[1] != 12 or not isinstance(shape[2], int) or shape[2] <= 0:
             raise unsupported("tensor_shape must be [batch, 12, crop_samples]")
         fs = float(inp.get("fs_hz", ECG_FS))
+        if not ECG_MIN_FS <= fs <= ECG_MAX_FS:
+            raise unsupported(f"fs_hz must be {ECG_MIN_FS:g}-{ECG_MAX_FS:g} Hz")
         record = int(inp.get("record_samples", round(ECG_SECONDS * fs)))
         crop = int(shape[2])
         stride = int(inp.get("window_stride_samples", crop))
-        if not (0 < crop <= record and stride > 0):
-            raise unsupported("crop and stride must fit inside the record")
+        if not (0 < crop <= record <= ECG_MAX_INPUT_SECONDS * fs and stride > 0):
+            raise unsupported(f"crop and stride must fit inside the record, at most {ECG_MAX_INPUT_SECONDS:g} s")
         ntype, nspec = _norm_type(inp)
         if ntype == "none":
             mean, std = np.zeros(12, np.float32), np.ones(12, np.float32)
@@ -162,8 +188,12 @@ class EcgAdapter:
 
     @staticmethod
     def to_record(x: np.ndarray, fs_in: float, fs: float, record: int, fill: np.ndarray) -> np.ndarray:
-        """Resample, then crop the central record or pad the end with each lead's training mean."""
-        y = resample(np.asarray(x, np.float64), fs_in, fs)
+        """Resample (bounded polyphase), then crop the central record or pad the end with each lead's training mean."""
+        x = np.asarray(x, np.float64)
+        if x.ndim != 2 or x.shape[0] > ECG_MAX_INPUT_ROWS or x.shape[1] > ECG_MAX_INPUT_SECONDS * fs_in:
+            raise ValueError(f"ECG input must be at most {ECG_MAX_INPUT_ROWS} leads and {ECG_MAX_INPUT_SECONDS:g} s")
+        ratio = ecg_resample_ratio(fs_in, fs)
+        y = x if ratio is None else sps.resample_poly(x, ratio[0], ratio[1], axis=-1)
         n = y.shape[1]
         if n >= record:
             off = (n - record) // 2

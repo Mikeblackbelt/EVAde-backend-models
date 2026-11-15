@@ -24,8 +24,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..models.deep import DEEP_TASKS, DeepEntry, DeepModelRegistry
-from ..models.deep_tasks import (ADAPTERS, ECG_LEADS, EPOCH_S, MOCK_SEIZURE_THRESHOLDS, SEIZURE_CHANNELS,
-                                 SLEEP_CHANNELS, SLEEP_FS)
+from ..models.deep_tasks import (ADAPTERS, ECG_FS, ECG_LEADS, EPOCH_S, MOCK_SEIZURE_THRESHOLDS, SEIZURE_CHANNELS,
+                                 SLEEP_CHANNELS, SLEEP_FS, ecg_resample_ratio)
 from ..preprocessing.eeg import norm_bipolar_name
 from .schemas import Source, _not_future
 
@@ -229,6 +229,10 @@ def build_router() -> APIRouter:
         A = _app()
         A.user(body.user_id)
         e = registry().get("ecg_deep")
+        try:                                     # same bound in mock mode, so a client never sees it change later
+            ecg_resample_ratio(body.fs_hz, e.spec["fs"] if e.available else ECG_FS)
+        except ValueError as ex:
+            raise A.err(422, "bad_shape", str(ex), "fs_hz") from None
         ad, x = ADAPTERS["ecg_deep"], body.canonical()
         core = ad.predict(e.spec, e.runner, x, body.fs_hz) if e.available else ad.mock(x, body.fs_hz)
         data = {**header("ecg_deep", e), **core,

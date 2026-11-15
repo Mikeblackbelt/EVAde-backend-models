@@ -2,6 +2,8 @@
 
 Three CPU models trained on open data with subject-wise evaluation, each with a logistic-regression baseline in the same protocol. **Beta: not tuned, not clinically validated, registered as `draft`.** The GPU was not used: when training started, another user held about 129 of 143 GB of GPU memory, below the 72 GB this project may use.
 
+Next: deep models on the CUNY HPCC cluster (SLURM) are planned in [training-plan-v2.md](../../lit%20review/planning/training-plan-v2.md), with job scripts in [hpc/](hpc/README.md).
+
 ## Run
 
 ```

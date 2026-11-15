@@ -519,3 +519,23 @@ def test_shape_and_value_errors(mock_registry):
     b = ecg_body(uid, leads=[c.upper() for c in reversed(ECG_LEADS)])   # any order and case is accepted
     b["t0_utc"] = NOW
     assert post("/v1/predict/ecg-deep", b).status_code == 200
+
+
+def test_ecg_deep_input_bounds(mock_registry):
+    """The deep-serving bounds (50-1000 Hz, polyphase factors <= 100, 60 s, 64 rows) hold on the one served ECG path."""
+    from evade.models.deep_tasks import EcgAdapter, ecg_resample_ratio
+    assert ecg_resample_ratio(100.0, 100.0) is None
+    assert ecg_resample_ratio(250.0, 100.0) == (2, 5)
+    assert ecg_resample_ratio(500.0, 100.0) == (1, 5)
+    for fs_in, fs_out in ((99.7, 100.0), (49.0, 100.0), (100.0, 1001.0), (997.0, 100.0)):
+        with pytest.raises(ValueError):
+            ecg_resample_ratio(fs_in, fs_out)
+    with pytest.raises(ValueError):                         # 61 s or 65 rows never reach the resampler
+        EcgAdapter.to_record(np.zeros((12, 6100)), 100.0, 100.0, 1000, np.zeros(12))
+    with pytest.raises(ValueError):
+        EcgAdapter.to_record(np.zeros((65, 1000)), 100.0, 100.0, 1000, np.zeros(65))
+    uid = new_user()
+    r = post("/v1/predict/ecg-deep", ecg_body(uid, fs=99.7))   # 1000/997 needs factors over 100: refused, also in mock
+    assert _err(r) == (422, "bad_shape") and r.json()["error"]["field"] == "fs_hz"
+    assert _err(post("/v1/predict/ecg-deep", ecg_body(uid, fs=40.0))) == (422, "validation_error")
+    assert post("/v1/predict/ecg-deep", ecg_body(uid, fs=500.0)).status_code == 200
