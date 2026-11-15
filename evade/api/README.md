@@ -8,8 +8,10 @@ FastAPI service for the hackathon-minimum subset of [api-schema.md](../../lit%20
 pip install -r requirements.txt
 export EVADE_API_TOKEN=<shared token>             # required; the service refuses requests without it
 export EVADE_CORS_ORIGINS=https://<frontend origin> # comma-separated allow-list; no wildcard
-export EVADE_MODEL_DIR=<folder with seizure/ and ecg/ from evade.training>   # optional
+export EVADE_MODEL_DIR=<folder with seizure/, ecg/, spaceweather/>   # optional
 export EVADE_ALLOW_DRAFT=1                         # serve the beta (draft) models, labelled draft
+export EVADE_SPACEWX_REPLAY_FILE=<storm.json>       # optional: enables provider "replay" (normalized JSON)
+export EVADE_SPACEWX_DISABLE_NETWORK=1             # optional: no NOAA provider (offline demos, tests)
 uvicorn evade.api.app:app --host 127.0.0.1 --port 8000
 ```
 
@@ -38,6 +40,7 @@ Every request except `GET /v1/health` needs `Authorization: Bearer <token>`. Int
 | `POST /v1/predict/ecg` | HR and HRV, quality, rule-based rhythm backstop, baseline comparison; for a 12-lead 10 s window at 100 Hz also the beta PTB-XL superclass probabilities (EVA-6) |
 | `POST /v1/predict/eeg` | quality, band-power ratios, baseline comparison; with the model loaded, a seizure-suspect flag from the beta model (EVA-2), which never raises override O4 on its own |
 | `POST /v1/predict/radiation-risk` | radiation domain score from the risk-score anchors, time to the career limit, solar particle event override O5 |
+| `POST /v1/predict/space-weather` | from a server-side provider (`noaa_swpc`, or `replay` if configured) or posted observations: NOAA S/R/G nowcast, SPE-in-progress flag, P(SPE onset within 24 h) from the draft model (EVA-8, if loaded), crew dose-rate estimate, the matching `/v1/predict/radiation-risk` inputs, and O5 as a candidate only; 503 `provider_unavailable` if the feed is down. See [spaceweather README](../spaceweather/README.md) |
 | `POST /v1/predict/risk` | risk score R (v2), band, flag, overrides, and maximum days to return (MDTR) with driver; MDTR is withheld without `logistics_floor_days` |
 | `POST /v1/input/self-report` | 1-5 ratings compared with the user's own baseline |
 | `POST /v1/input/instrument` | PHQ-9 or GAD-7 score and band; PHQ-9 item 9 above 0 raises override O1 (clinician contact) |

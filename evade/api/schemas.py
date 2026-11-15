@@ -138,6 +138,45 @@ class RadiationRequest(BaseModel):
         return _not_future(v)
 
 
+class SpaceWeatherObs(BaseModel):
+    """One normalized observation (evade/spaceweather/schema.py FIELDS); every value is optional."""
+    t_utc: datetime
+    proton_10mev_pfu: float | None = Field(None, ge=0, le=1e7)
+    proton_50mev_pfu: float | None = Field(None, ge=0, le=1e7)
+    proton_100mev_pfu: float | None = Field(None, ge=0, le=1e7)
+    xray_long_wm2: float | None = Field(None, ge=0, le=0.1)
+    xray_short_wm2: float | None = Field(None, ge=0, le=0.1)
+    kp: float | None = Field(None, ge=0, le=9)
+    sw_speed_kms: float | None = Field(None, ge=0, le=5000)
+    sw_density_cm3: float | None = Field(None, ge=0, le=1000)
+    bz_gsm_nt: float | None = Field(None, ge=-500, le=500)
+    dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
+
+    @field_validator("t_utc")
+    @classmethod
+    def check_time(cls, v):
+        return _not_future(v)
+
+
+class SpaceWeatherRequest(BaseModel):
+    user_id: str
+    provider: Literal["noaa_swpc", "replay"] | None = Field(None, description="server-side provider by name; or send observations")
+    observations: list[SpaceWeatherObs] | None = Field(None, max_length=5000)
+    location: Literal["deep_space", "lunar_surface", "mars_surface", "leo_iss"] = "deep_space"
+    shielding: Literal["eva_suit", "spacecraft", "storm_shelter"] = "spacecraft"
+    cumulative_dose_msv: float | None = Field(None, ge=0, le=5000)
+    measured_dose_rate_usv_h: float | None = Field(None, ge=0, le=1e6)
+    seu_count_last_hour: int = Field(0, ge=0)
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if (self.provider is None) == (self.observations is None):
+            raise ValueError("give exactly one of provider or observations")
+        if self.observations is not None and len(self.observations) == 0:
+            raise ValueError("observations must not be empty")
+        return self
+
+
 class DomainIn(BaseModel):
     s: float = Field(ge=0, le=1)
     q: float = Field(1.0, ge=0, le=1)

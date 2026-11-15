@@ -4,8 +4,10 @@ Run:  EVADE_API_TOKEN=... EVADE_MODEL_DIR=~/evade_train_beta EVADE_ALLOW_DRAFT=1
 Env:
   EVADE_API_TOKEN      shared bearer token (required; the hackathon uses one shared token plus user_id)
   EVADE_CORS_ORIGINS   comma-separated allow-list (default: none)
-  EVADE_MODEL_DIR      folder with seizure/ and ecg/ beta model outputs (optional)
+  EVADE_MODEL_DIR      folder with seizure/, ecg/ and spaceweather/ beta model outputs (optional)
   EVADE_ALLOW_DRAFT    "1" to serve draft (beta) models; they are labelled draft in every response
+  EVADE_SPACEWX_REPLAY_FILE      normalized space-weather JSON for provider "replay" (optional)
+  EVADE_SPACEWX_DISABLE_NETWORK  "1" disables the NOAA SWPC provider (offline demos, tests)
 State is in memory (lost on restart). Outputs are flags for human review, never diagnoses.
 """
 from __future__ import annotations
@@ -31,6 +33,10 @@ from ..preprocessing.ecg import detect_qrs, hrv_features, preprocess_ecg
 from ..preprocessing.eeg import bipolar_from_monopolar, preprocess_eeg, select_bipolar
 from ..preprocessing.signal import make_windows, signal_quality
 from ..risk.engine import DomainInput, mdtr, radiation_domain, risk
+from ..spaceweather import model as SW
+from ..spaceweather.model import load_forecaster
+from ..spaceweather.providers import ProviderUnavailable, get_provider
+from ..spaceweather.schema import Observations, Record
 from ..training.features import EEG_BANDS, ecg_features, spectral_features
 from . import schemas as S
 
@@ -78,6 +84,12 @@ def load_models() -> dict:
             out[task] = {"model": joblib.load(d / "model.joblib"),
                          "features": json.loads((d / "feature_names.json").read_text()),
                          "metrics": m, "model_id": eva, "status": "draft"}
+    try:
+        sw = load_forecaster(root)              # verifies the manifest sha256 before unpickling
+    except ValueError:
+        sw = None                               # hash mismatch: serve nowcast and dose without the forecast
+    if sw:
+        out["spaceweather"] = sw
     return out
 
 
@@ -263,7 +275,8 @@ def models():
     for task, m in STATE.models.items():
         rows.append({"task": task, "model_id": m["model_id"], "status": m["status"], "headline": headline(task, m["metrics"])})
     return envelope(None, {"models": rows, "draft_served": os.environ.get("EVADE_ALLOW_DRAFT") == "1",
-                           "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison"]})
+                           "rule_based": ["radiation domain (risk-score.md)", "risk score v2 and MDTR", "baseline comparison",
+                                          "space-weather nowcast (NOAA scales) and dose-rate estimate (assumptions)"]})
 
 
 def headline(task: str, m: dict) -> dict:
@@ -273,6 +286,11 @@ def headline(task: str, m: dict) -> dict:
                 "external_siena_auroc": m.get("external_siena", {}).get("hgb", {}).get("auroc")}
     if task == "ecg":
         return {"macro_auroc_test_fold": m["hgb"]["macro_auroc"], "ci95": m["hgb"]["macro_auroc_ci95"]}
+    if task == "spaceweather":
+        a = m.get("protocol_a_time_forward", {})
+        return {"test_brier": a.get("model", {}).get("brier"), "test_bss": a.get("model", {}).get("bss"),
+                "test_auroc": a.get("model", {}).get("auroc"), "persistence_brier": a.get("persistence", {}).get("brier"),
+                "test_range": a.get("split", {}).get("test")}
     return {}
 
 
@@ -460,6 +478,50 @@ def predict_radiation(body: S.RadiationRequest):
                                    "remaining_allowance_msv": round(600 - body.cumulative_dose_msv, 1),
                                    "t_rad_days": round(max(t_rad, 0.0), 1) if t_rad is not None else None,
                                    "spe_override": o5, "rule_version": "risk-score.md v2"})
+
+
+SPACEWX_HOURS = 72      # the forecast features need 48 h; the NOAA 3-day feeds cover it
+
+
+@app.post("/v1/predict/space-weather", dependencies=[Depends(auth)])
+def predict_space_weather(body: S.SpaceWeatherRequest):
+    """Nowcast (NOAA S/R/G scales, SPE flag), SPE onset probability (draft model), dose-rate estimate, and the inputs
+    for /v1/predict/radiation-risk. Nothing is stored and no override is raised: O5 is returned as a candidate."""
+    user(body.user_id)
+    if body.observations is not None:
+        obs = Observations("request", [Record.make(o.t_utc, **o.model_dump(exclude={"t_utc"}, exclude_none=True))
+                                       for o in body.observations])
+    else:
+        try:
+            obs = get_provider(body.provider).fetch(SPACEWX_HOURS)
+        except ProviderUnavailable as e:
+            raise err(503, "provider_unavailable", f"space-weather provider '{body.provider}' unavailable: {e}", "provider")
+    if not obs.has("proton_10mev_pfu"):
+        raise err(422, "validation_error", "observations need at least one proton_10mev_pfu value", "observations")
+    nc = SW.nowcast(obs)
+    fc = SW.forecast(STATE.models.get("spaceweather"), obs, nc)
+    dose = SW.dose_estimate(obs, body.location, body.shielding, body.measured_dose_rate_usv_h)
+    rin = SW.radiation_inputs(dose, body.cumulative_dose_msv, body.seu_count_last_hour)
+    data = {"nowcast": nc, "forecast": fc, "dose": dose, "radiation_inputs": rin, "o5": SW.o5_candidate(dose),
+            "assumptions": SW.ASSUMPTIONS,
+            "source": {"name": obs.source, "fetched_at": obs.fetched_at.isoformat(), "records": len(obs.records),
+                       "warnings": obs.warnings, "meta": obs.meta},
+            "note": "flags and estimates for human review, not dosimetry; forward radiation_inputs to "
+                    "/v1/predict/radiation-risk to update the radiation domain"}
+    if body.cumulative_dose_msv is not None:
+        di, parts = radiation_domain(body.cumulative_dose_msv, rin["spe_dose_msv"], rin["rate_ratio_to_7d_median"],
+                                     body.seu_count_last_hour)
+        rate = rin["dose_equivalent_rate_msv_per_day"]
+        t_rad = (600 - body.cumulative_dose_msv - 25) / rate if rate > 0 else None
+        data["radiation_domain_preview"] = {"s": round(di.s, 3), "components": parts,
+                                            "confidence": "low_confidence" if di.q < 0.5 else "ok",
+                                            "t_rad_days": round(max(t_rad, 0.0), 1) if t_rad is not None else None,
+                                            "rule_version": "risk-score.md v2"}
+    ids = [fc["model_id"]] if fc.get("model_id") else []
+    warn = nc["warnings"] + fc.get("warnings", []) + obs.warnings + (["draft model output"] if ids else [])
+    if dose["source"] == "estimated":
+        warn.append("dose rate is a model estimate from assumptions, not a measurement")
+    return envelope(body.user_id, data, ids, warn)
 
 
 @app.post("/v1/predict/risk", dependencies=[Depends(auth)])
