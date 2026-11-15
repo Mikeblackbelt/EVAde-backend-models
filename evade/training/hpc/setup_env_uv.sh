@@ -14,5 +14,5 @@ export UV_PYTHON_INSTALL_DIR=$PROJECT/python UV_CACHE_DIR=$PROJECT/.uvcache
 tools/bin/uv python install 3.12
 [ -x venv/bin/python ] || tools/bin/uv venv -q --python 3.12 venv
 tools/bin/uv pip install -q --python venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
-tools/bin/uv pip install -q --python venv/bin/python numpy pandas scikit-learn onnx
-venv/bin/python -c 'import torch, numpy, sklearn, onnx; print("torch", torch.__version__, "cuda", torch.version.cuda)'
+tools/bin/uv pip install -q --python venv/bin/python numpy pandas scikit-learn onnx pyedflib
+venv/bin/python -c 'import torch, numpy, sklearn, onnx, pyedflib; print("torch", torch.__version__, "cuda", torch.version.cuda)'
