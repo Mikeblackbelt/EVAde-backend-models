@@ -5,7 +5,8 @@
 Protocol (PTB-XL benchmark style): random 2.5 s crops for training; at evaluation, sliding 2.5 s windows with
 1.25 s stride over the 10 s record, sigmoid outputs averaged. Model selection on fold 9 (val) macro AUROC per epoch;
 fold 10 (test) is scored once per seed with the selected checkpoint. Per-lead standardization from the train folds.
-SIGUSR1 (sbatch --signal=B:USR1@N) saves a checkpoint and exits 99, so the same job file can be resubmitted.
+SIGUSR1 (sbatch --signal=B:USR1@N) exits 99 without a mid-epoch save; last.pt (written after every finished epoch)
+is where a resubmit of the same job file resumes.
 """
 from __future__ import annotations
 
@@ -142,9 +143,9 @@ def train_seed(a, d: Data, seed: int, outdir: Path, device) -> dict:
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward(); scaler.step(opt); scaler.update(); sched.step()
             tot += float(loss)
-            if STOP["flag"]:
-                save(ep - 1)
-                print(f"seed {seed}: SIGUSR1 at epoch {ep}, checkpoint saved; exiting 99", flush=True)
+            if STOP["flag"]:   # no mid-epoch save: last.pt stays at the last finished epoch, so a resume
+                # replays this epoch with the scheduler at the right step (a mid-epoch save overshoots OneCycleLR)
+                print(f"seed {seed}: SIGUSR1 at epoch {ep}; exiting 99, resume restarts this epoch", flush=True)
                 sys.exit(99)
         val_auc, _ = macro_auroc(d.yva, predict(model, d.xva, a.crop, a.stride))
         hist.append({"epoch": ep, "loss": tot / steps, "val_macro_auroc": val_auc, "sec": round(time.time() - t0, 1)})

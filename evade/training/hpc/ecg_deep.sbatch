@@ -1,7 +1,8 @@
 #!/bin/bash
 # GPU job: deep ECG on PTB-XL (one GPU, one node). Configs run one after another in this single job:
 # xresnet1d101 x seeds, then resnet1d_wang x 1 seed, then export of the selected xresnet1d101 seed.
-# Resubmitting the same file resumes (finished seeds are skipped; SIGUSR1 near the time limit checkpoints).
+# Resubmitting the same file resumes (finished seeds are skipped; SIGUSR1 near the time limit exits 99 and a
+# resubmit resumes from the last finished epoch).
 #   smoke: sbatch --export=ALL,SMOKE=1 --time=00:20:00 ecg_deep.sbatch
 #   full:  sbatch ecg_deep.sbatch
 #SBATCH --job-name=evade-ecg-deep
@@ -41,7 +42,7 @@ GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
 case "$GPU" in *K20*|*K40*|*K80*|"") echo "unsupported or missing GPU '$GPU'" >> job_info.txt; exit 3 ;; esac
 [ -s "$PROJECT/data/ptbxl100/ptbxl100.npz" ] || { echo "missing packed data; run ecg_prep.sbatch" >> job_info.txt; exit 4; }
 
-# forward SIGUSR1 from the batch shell to the running python step, which checkpoints and exits 99
+# forward SIGUSR1 from the batch shell to the running python step, which exits 99 (last.pt = last finished epoch)
 child=0
 trap '[ $child -ne 0 ] && kill -USR1 $child' USR1
 step() {   # step <log> <args...>
