@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import numbers
 import time
 import uuid
 from pathlib import Path
@@ -26,14 +27,21 @@ MAX_PARAMS = 100
 USER_TABLES = ("users", "baselines", "baseline_archive", "user_state", "inputs", "flags", "risk_results", "devices")
 
 
-def _val(v: Any) -> Any:
-    if isinstance(v, bool):
-        return int(v)
-    if isinstance(v, float) and not math.isfinite(v):
+def _val(v: Any) -> str | None:
+    """D1 REST params are documented as strings: send scalars as text (column affinity turns numeric text back into
+    REAL/INTEGER on insert and compares it as a number) and keep NULL as null."""
+    if v is None:
         return None
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, numbers.Integral):
+        return str(int(v))
+    if isinstance(v, numbers.Real):
+        f = float(v)
+        return repr(f) if math.isfinite(f) else None
     if isinstance(v, (dict, list, tuple)):
         return _dumps(v)
-    return v
+    return str(v)
 
 
 def _json_default(o: Any) -> Any:

@@ -254,6 +254,20 @@ def test_api_delete_is_retryable_when_storage_fails(api_cf):
     assert fake.count("users", uid) == 0
 
 
+def test_api_ingest_storage_failure_after_seq_commit_is_not_an_error(api_cf):
+    from datetime import datetime, timezone
+    C, H, A, st, fake = api_cf
+    uid = C.post("/v1/users", json={"consent": True}, headers=H).json()["data"]["user_id"]
+    assert C.post("/v1/devices/bind", json={"user_id": uid, "device_id": "cf-dev-ing", "kind": "hr_strap"}, headers=H).status_code == 200
+    rd = {"metric": "hr_bpm", "value": 61.0, "unit": "bpm", "t_utc": datetime.now(timezone.utc).isoformat(), "modality": "ecg"}
+    fake.fail_with = [503] * 4                      # the device write fails after the seq is committed
+    r = C.post("/v1/ingest/batch", json={"user_id": uid, "device_id": "cf-dev-ing", "seq": 0, "readings": [rd]}, headers=H)
+    assert r.status_code == 200 and r.json()["data"]["accepted"] == 1 and r.json()["warnings"]
+    assert A.STATE.devices["cf-dev-ing"]["last_seq"] == 0
+    d = C.post("/v1/ingest/batch", json={"user_id": uid, "device_id": "cf-dev-ing", "seq": 0, "readings": [rd]}, headers=H).json()
+    assert d["data"]["duplicates"] == 1
+
+
 def test_api_storage_outage_returns_503(api_cf):
     C, H, A, st, fake = api_cf
     fake.fail_with = [503] * 4

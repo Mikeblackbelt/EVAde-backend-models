@@ -699,12 +699,19 @@ def ingest_batch(body: S.IngestBatch):
         if body.battery_pct is not None:
             dev["battery_pct"] = body.battery_pct
         dev_rec = dict(dev)
-    STATE.storage.put_device(body.device_id, dev_rec)
-    remember(body.user_id, comps)
-    log_inputs(body.user_id, body.windows, "ingest/batch", body.readings)
+    # the seq is committed: a storage failure from here on must not fail the request, or the device's retry
+    # would be counted as a duplicate and the batch lost; the in-memory state is already updated
+    warn = []
+    for step in (lambda: STATE.storage.put_device(body.device_id, dev_rec), lambda: remember(body.user_id, comps),
+                 lambda: log_inputs(body.user_id, body.windows, "ingest/batch", body.readings)):
+        try:
+            step()
+        except StorageError as e:
+            log.warning("ingest storage write failed after seq commit: %s", e)
+            warn = ["accepted; the storage write failed and this batch is kept in this service only"]
     flagged = [c for c in comps if c["level"] != "green"]
     return envelope(body.user_id, {"accepted": len(body.windows) + len(body.readings), "duplicates": 0,
                                    "gap_before": max(gap, 0), "next_seq_expected": body.seq + 1,
                                    "comparison_summary": {"n": len(comps), "n_flagged": len(flagged),
                                                           "levels": sorted({c["level"] for c in comps})},
-                                   "alerts": alerts_for(comps)})
+                                   "alerts": alerts_for(comps)}, warnings=warn)

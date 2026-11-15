@@ -25,6 +25,7 @@ class FakeD1:
 
     def _run(self, sql: str, params: list) -> list[dict]:
         assert sql.count("?") <= 100 and len(params) <= 100, "D1 allows at most 100 bound parameters"
+        assert all(p is None or isinstance(p, str) for p in params), "D1 REST params are strings or null"
         self.max_params_seen = max(self.max_params_seen, len(params))
         cur = self.db.execute(sql, params)
         return [dict(r) for r in cur.fetchall()] if cur.description else []

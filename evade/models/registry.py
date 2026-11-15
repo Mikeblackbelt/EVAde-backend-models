@@ -179,7 +179,10 @@ class ModelRegistry:
             e.sha256_verified = True
         inp = m["input"]
         if inp.get("kind") == "features":
-            e.features = _read_json(_inside(e.path, inp["features"]))
+            ref = inp.get("features") or ("feature_names.json" if (e.path / "feature_names.json").is_file() else None)
+            e.features = _read_json(_inside(e.path, ref)) if ref else None
+        if MF.missing_recommended(m) and not e.legacy:
+            log.warning("model folder %s manifest lacks %s", e.task, ", ".join(MF.missing_recommended(m)))
         mp = e.path / "metrics.json"
         e.metrics = _read_json(mp) if mp.is_file() else {}
         e.model = LOADERS[m["format"]](w)

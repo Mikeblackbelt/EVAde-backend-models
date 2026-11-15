@@ -96,6 +96,8 @@ Setup (once):
 | `CF_R2_ENDPOINT` | only for jurisdiction buckets, for example `https://<account>.eu.r2.cloudflarestorage.com` |
 | `EVADE_STORE_RAW_WINDOWS` | `1` to keep raw windows in R2 (off by default) |
 
+**Run one API process (one worker, one replica) per database.** The in-memory working copy, the deletion gate and the device sequence checks are per process, so several workers writing to the same D1 database could overwrite each other's baselines or let a late write slip past a deletion in another worker. Apply `schema.sql` before the first start with `EVADE_STORAGE=cloudflare`.
+
 Model folders can live in the same bucket under `models/<task>/` and be synced with `scripts/fetch_models.py`. Credentials are never logged or included in error messages. A storage outage returns 503 `storage_unavailable`. Baseline updates that fail to write stay in memory and are retried on the next request.
 
 ## Not done yet

@@ -123,19 +123,60 @@ def test_legacy_beta_folders_still_load(tmp_path):
     assert ModelRegistry(tmp_path, allow_draft=False).scan()["seizure"].available is False
 
 
-def test_training_writes_a_servable_folder(tmp_path):
+def test_hand_written_minimal_manifest_loads(tmp_path):
+    """Only the fields named in the task (no input.kind / output.type, labels instead of classes, aliases)."""
+    d = tmp_path / "spaceweather"
+    d.mkdir()
+    X = np.random.default_rng(2).standard_normal((50, 3))
+    joblib.dump(LogisticRegression().fit(X, (X[:, 1] > 0).astype(int)), d / "model.joblib")
+    (d / "feature_names.json").write_text(json.dumps(FEATS))
+    m = {"model_id": "EVA-95", "task": "spaceweather", "status": "draft", "format": "joblib", "weights": "model.joblib",
+         "sha256": MF.sha256_file(d / "model.joblib"),
+         "input": {"modality": "space_weather", "window_s": 3600, "feature_names": "feature_names.json"},
+         "output": {"labels": ["elevated_radiation"], "thresholds": {"review": 0.5}},
+         "commit": "abc", "trained_at": "2026-11-14T00:00:00Z", "data_used": "NOAA SWPC (test)"}
+    (d / "manifest.json").write_text(json.dumps(m))
+    e = ModelRegistry(tmp_path, allow_draft=True).scan()["spaceweather"]
+    assert e.available, e.reason
+    assert e.features == FEATS and e.manifest["input"]["kind"] == "features"
+    assert e.manifest["output"]["classes"] == ["elevated_radiation"] and e.manifest["code_commit"] == "abc"
+    del m["input"]["feature_names"]                 # no reference: feature_names.json in the folder is used
+    (d / "manifest.json").write_text(json.dumps(m))
+    assert ModelRegistry(tmp_path, allow_draft=True).scan()["spaceweather"].features == FEATS
+
+
+TRAIN_CASES = {
+    "seizure": ({"leave_one_subject_out_chbmit": {"hgb": {
+        "pooled_auroc": 0.9, "subject_auroc_ci": {"mean": 0.9}, "threshold_at_1pct_fpr": 0.8,
+        "operating_points": [{"target_fpr": 0.01, "threshold": 0.8}, {"target_fpr": 0.05, "threshold": 0.4}]}},
+        "subjects": ["chb01"], "n_windows": 40}, "binary"),
+    "sleep": ({"leave_one_subject_out": {"hgb": {"subject_kappa_ci": {"mean": 0.6}},
+                                         "logreg_baseline": {"subject_kappa_ci": {"mean": 0.6}}},
+               "subjects": ["SC400"], "n_epochs": 40}, "multiclass"),
+    "ecg": ({"hgb": {"macro_auroc": np.float64(0.8), "macro_auroc_ci95": [0.7, 0.9]}, "split": "test", "n_train": 40},
+            "multilabel"),
+}
+
+
+@pytest.mark.parametrize("task", sorted(TRAIN_CASES))
+def test_training_writes_a_servable_folder(tmp_path, task):
     pytest.importorskip("pandas")
     from evade.training.train import _write
     rng = np.random.default_rng(1)
     X = rng.standard_normal((40, 4))
-    model = {k: LogisticRegression().fit(X, (X[:, i] > 0).astype(int)) for i, k in enumerate(["NORM", "MI"])}
-    metrics = {"hgb": {"macro_auroc": np.float64(0.8), "macro_auroc_ci95": [0.7, 0.9]}, "split": "test", "n_train": 40}
-    _write(tmp_path, "ecg", metrics, model, ["f1", "f2", "f3", "f4"], Namespace(model_id="EVA-96", smoke=True))
-    m = json.loads((tmp_path / "ecg" / "manifest.json").read_text())
-    assert m["model_id"] == "EVA-96" and m["input"]["fs_hz"] == 100.0 and m["output"]["type"] == "multilabel"
-    assert m["headline"]["macro_auroc_test_fold"] == 0.8 and m["data"]["smoke"] is True
-    served = ModelRegistry(tmp_path, allow_draft=True).scan()["ecg"]
-    assert served.available and served.sha256_verified and set(served.model) == {"NORM", "MI"}
+    y = (X[:, 0] > 0).astype(int)
+    model = {k: LogisticRegression().fit(X, y) for k in ("NORM", "MI")} if task == "ecg" else LogisticRegression().fit(X, y)
+    metrics, otype = TRAIN_CASES[task]
+    _write(tmp_path, task, metrics, model, ["f1", "f2", "f3", "f4"],
+           Namespace(model_id="EVA-96", smoke=True, siena="x" if task == "seizure" else None))
+    m = json.loads((tmp_path / task / "manifest.json").read_text())
+    assert m["model_id"] == "EVA-96" and m["output"]["type"] == otype and m["data"]["smoke"] is True
+    assert m["headline"], "headline_from_metrics must understand this task's metrics.json"
+    if task == "seizure":
+        assert m["output"]["thresholds"] == {"review": 0.4, "suspect": 0.8} and len(m["input"]["channels"]) == 18
+    served = ModelRegistry(tmp_path, allow_draft=True).scan()[task]
+    assert served.available and served.sha256_verified, served.reason
+    assert served.features == ["f1", "f2", "f3", "f4"]
 
 
 def test_push_then_pull_verifies_hashes(tmp_path):

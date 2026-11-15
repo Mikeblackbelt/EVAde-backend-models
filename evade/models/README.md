@@ -29,12 +29,20 @@ Every servable model is one folder, `<EVADE_MODEL_DIR>/<task>/`, wherever it was
 | `sha256` | yes | SHA-256 of the weights file, checked before anything is deserialized |
 | `files` | written by export | `{file name: sha256}` for `feature_names.json` and `metrics.json`, also checked |
 | `input` | yes | `kind` (`features` or `tensor`), `modality`, and as relevant `fs_hz`, `window_s`, `step_s`, `channels` or `leads`, `features` (the feature list file, for `features`), `tensor_shape` (for `tensor`), `normalization` (for example `per_user_robust`) |
-| `output` | yes | `type` (`binary`, `multiclass`, `multilabel`, `regression`), `classes` (labels), `thresholds` (named operating points, for example `review` and `suspect`) and `operating_points` (target FPR, threshold, sensitivity) |
+| `output` | yes | `type` (optional) (`binary`, `multiclass`, `multilabel`, `regression`), `classes` (labels), `thresholds` (named operating points, for example `review` and `suspect`) and `operating_points` (target FPR, threshold, sensitivity) |
 | `headline` | optional | short metric summary shown by `GET /v1/models` |
-| `code_commit` | yes | git commit of the training code (`EVADE_CODE_COMMIT`, a `COMMIT` file at the tree root, or `git rev-parse HEAD`) |
-| `trained_at` | yes | UTC ISO time |
-| `data` | yes | datasets, versions, subjects or splits used |
+| `code_commit` | recommended | git commit of the training code (`EVADE_CODE_COMMIT`, a `COMMIT` file at the tree root, or `git rev-parse HEAD`) |
+| `trained_at` | recommended | UTC ISO time |
+| `data` | recommended | datasets, versions, subjects or splits used |
 | `claim` | written by export | "outputs are flags for human review, not diagnoses" |
+
+Required: `model_id`, `task`, `status`, `format`, `weights`, `sha256`, `input` (with `modality`), and `output`. A missing `code_commit`, `trained_at` or `data` is logged as a warning, not refused. Hand-written manifests are read leniently:
+- `input.kind` is inferred: `tensor` if `tensor_shape` is given, otherwise `features`;
+- `input.feature_names` or `input.feature_list` count as `input.features`, and without any reference the folder's `feature_names.json` is used;
+- `output.labels` counts as `output.classes`, and `output.type` is optional;
+- `commit` counts as `code_commit`, and `data_used` counts as `data`.
+
+`write_manifest` always writes the canonical names.
 
 Example (abridged):
 
