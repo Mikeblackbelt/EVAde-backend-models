@@ -637,7 +637,8 @@ def create_user(body: S.UserCreate):
         # lost, the client retries and gets a new user; the first row is an orphan nobody holds the ID of, with only
         # created_at and the coarse attributes above (no health data). Accepted for the beta (see the README). Send
         # user_id to make the call idempotent instead.
-        STATE.storage.put_user(uid, rec)
+        if STATE.storage.persistent:
+            STATE.storage.put_user(uid, rec)
         with STATE.lock:
             STATE.users[uid] = rec
         return envelope(uid, _user_out(uid, rec, True))
@@ -654,7 +655,8 @@ def create_user(body: S.UserCreate):
         return envelope(uid, _user_out(uid, existing, False))     # attributes of an existing user are not changed
     # insert-only (ON CONFLICT DO NOTHING): a concurrent create with the same ID cannot overwrite the first one's
     # attributes; the stored row is read back so every caller sees the same user. Tombstone-gated in storage too.
-    STATE.storage.put_user(uid, rec, if_absent=True)
+    if STATE.storage.persistent:
+        STATE.storage.put_user(uid, rec, if_absent=True)
     stored = (STATE.storage.get_user(uid) if STATE.storage.persistent else None) or rec
     with STATE.lock:
         if STATE.storage.is_deleted(uid, check_remote=False) or uid in STATE.pending_deletes:

@@ -2,6 +2,7 @@
 409 for a deleted ID) and DELETE /v1/users/{id} (200 once, 404 after; an incomplete deletion is retried with 200).
 Memory backend and the Cloudflare backend against the fakes (tests/fakes.py)."""
 import uuid
+from time import perf_counter
 
 import pytest
 
@@ -31,6 +32,18 @@ def test_without_user_id_the_server_generates_one():
     assert r.status_code == 200 and d["created"] is True
     assert uuid.UUID(d["user_id"]).version == 4 and r.json()["user_id"] == d["user_id"]
     assert create(C).json()["data"]["user_id"] != d["user_id"]
+
+
+def test_memory_user_creation_p95_is_under_300ms():
+    create(C)  # warm the test client and route before measuring repeated creates
+    elapsed = []
+    for _ in range(20):
+        started = perf_counter()
+        r = create(C)
+        elapsed.append(perf_counter() - started)
+        assert r.status_code == 200
+    elapsed.sort()
+    assert elapsed[18] < 0.3
 
 
 def test_register_under_an_existing_id_is_idempotent():
